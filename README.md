@@ -15,10 +15,7 @@
 
 ## 运行要求
 
-- ImmortalWrt / OpenWrt ≥ 24.10（`apk` 或 `opkg` 均可安装）
-- **sing-box ≥ 1.14.0 是硬要求**：ImmortalWrt 25.12 源对应 sing-box 1.14.0-r1，
-  而 OpenWrt 24.10 官方源没有这个版本——包能装上，服务起不来，需要换源或自建 feed
-- 低于 1.14 时服务拒绝启动并记录明确日志
+- ImmortalWrt / OpenWrt ≥ 24.10（`apk` 或 `opkg` 均可安装）；sing-box ≥ 1.14.0 是硬要求；低于 1.14 时服务拒绝启动并记录明确日志
 
 ## 按功能性对比
 
