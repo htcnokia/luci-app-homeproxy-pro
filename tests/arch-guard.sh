@@ -28,7 +28,8 @@
 # production reads a different place.  These guards compare the layers to each
 # other instead of comparing each layer to a fixture.
 #
-# POSIX sh only - no ucode, no node, no python.  Run:
+# POSIX sh + python3 for the scanners python is better at.  No ucode,
+# no node.  Run:
 #   sh tests/arch-guard.sh [repo-root]
 
 set -u
@@ -40,6 +41,21 @@ ACL="$ROOT/root/usr/share/rpcd/acl.d/luci-app-homeproxy.json"
 VIEWS="$ROOT/htdocs/luci-static/resources"
 RUNTIME="$SCRIPTS/runtime"
 
+# assert_empty treats "no stdout" as a pass, which makes the suite
+# green on an unrelated /etc tree or any path that exists but is not
+# this repo.  Bail out loudly before any of that happens: a guard
+# that says PASS while scanning nothing is worse than a guard that
+# says FAIL, because nothing else in the report can tell them apart.
+if [ ! -d "$SCRIPTS" ] || [ ! -f "$RPC" ] || [ ! -f "$ACL" ] || [ ! -d "$VIEWS" ]; then
+	printf 'FATAL: arch-guard.sh needs the full repo tree under %s\n' "$ROOT" >&2
+	printf '       (missing %s%s%s%s)\n' \
+		"$([ -d "$SCRIPTS" ] || printf '%s ' "$SCRIPTS")" \
+		"$([ -f "$RPC" ]     || printf '%s ' "$RPC")" \
+		"$([ -f "$ACL" ]     || printf '%s ' "$ACL")" \
+		"$([ -d "$VIEWS" ]   || printf '%s ' "$VIEWS")" >&2
+	exit 2
+fi
+
 FAILED=0
 checks=0
 
@@ -47,9 +63,22 @@ pass() { checks=$((checks + 1)); printf 'PASS: %s\n' "$1"; }
 fail() { checks=$((checks + 1)); FAILED=1; printf 'FAIL: %s\n' "$1"; }
 
 # assert_empty <description> <command...>
+#
+# Empty stdout is a pass only when the scan actually ran.  "Actually ran"
+# means: the command existed (rc != 127) and could read its target (rc
+# != 126, "cannot execute").  A grep that finds nothing exits 1 with
+# empty stdout - the legitimate "nothing to report" answer - and stays
+# a pass.  A grep on a path that does not exist exits 2 ("No such
+# file"), which we DO want to flag: the previous behaviour silently
+# produced green checks for nonexistent repos.
 assert_empty() {
 	desc="$1"; shift
 	out="$("$@" 2>/dev/null)"
+	rc=$?
+	if [ "$rc" -ge 126 ]; then
+		fail "$desc (scanner exited $rc - the command or the target is missing)"
+		return
+	fi
 	if [ -z "$out" ]; then
 		pass "$desc"
 	else
@@ -850,7 +879,7 @@ for raw in sys.stdin:
         continue
     if not quote.search(body):
         print(line)
-')"
+')" || UNQUOTED="__SCAN_FAILED__"
 
 # Two exclusions the rule has to live with:
 #   - update_subscriptions.uc uses sprintf() with shellQuote() arguments,
@@ -862,7 +891,9 @@ for raw in sys.stdin:
 #   - firewall_pre.uc writes nft fragments to disk rather than passing
 #     them to a shell, so its system() calls only see literal commands.
 
-if [ -z "$UNQUOTED" ]; then
+if [ "$UNQUOTED" = "__SCAN_FAILED__" ]; then
+	fail "the shellQuote() coverage scan could not run - fix the guard before trusting a pass"
+elif [ -z "$UNQUOTED" ]; then
 	pass "every shell arg with \${...} interpolation goes through shellQuote()"
 else
 	fail "shell args with \${...} interpolation bypass shellQuote():"
@@ -1109,8 +1140,10 @@ for f in sorted((root / 'htdocs').rglob('*.js')):
                 bad.append(f'{f.relative_to(root)}:{n}: L.bind(hp.{meth}, {recv}, ...)')
 print('\n'.join(bad))
 PY
-)"
-if [ -z "$BOUND_WRONG" ]; then
+)" || BOUND_WRONG="__SCAN_FAILED__"
+if [ "$BOUND_WRONG" = "__SCAN_FAILED__" ]; then
+	fail "the bound-receiver scan could not run - fix the guard before trusting a pass"
+elif [ -z "$BOUND_WRONG" ]; then
 	pass "every receiver-dependent hp method is bound to hp"
 else
 	fail "an hp method that reads \`this\` is bound to a foreign receiver:"
@@ -1161,8 +1194,10 @@ for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.uc')):
             bad.append(f'{f.name}:{n}: ${{{e}}}')
 print('\n'.join(bad))
 PY
-)"
-if [ -z "$EXEC_UNQUOTED" ]; then
+)" || EXEC_UNQUOTED="__SCAN_FAILED__"
+if [ "$EXEC_UNQUOTED" = "__SCAN_FAILED__" ]; then
+	fail "the executeCommand() interpolation scan could not run - fix the guard before trusting a pass"
+elif [ -z "$EXEC_UNQUOTED" ]; then
 	pass "every executeCommand() interpolation is shellQuote()d or numeric"
 else
 	fail "an executeCommand() argument reaches the shell unquoted:"
@@ -1246,8 +1281,10 @@ elif lock is not None and lls < lock:
     problems.append('load_locked_state() at line %d runs before the lock at line %d' % (lls, lock))
 print('\n'.join(problems))
 PY
-)"
-if [ -z "$SNAP_ORDER" ]; then
+)" || SNAP_ORDER="__SCAN_FAILED__"
+if [ "$SNAP_ORDER" = "__SCAN_FAILED__" ]; then
+	fail "the lock-ordering scan could not run - fix the guard before trusting a pass"
+elif [ -z "$SNAP_ORDER" ]; then
 	pass "the domain model and the recovery snapshot are read after the lock"
 else
 	fail "the subscription run reads state outside the lock:"
@@ -1284,8 +1321,10 @@ if not problems and backend != frontend:
     problems.append('homeproxy.uc %s != homeproxy.js %s' % (backend, frontend))
 print('\n'.join(problems))
 PY
-)"
-if [ -z "$CERT_ROOTS" ]; then
+)" || CERT_ROOTS="__SCAN_FAILED__"
+if [ "$CERT_ROOTS" = "__SCAN_FAILED__" ]; then
+	fail "the cert-roots scan could not run - fix the guard before trusting a pass"
+elif [ -z "$CERT_ROOTS" ]; then
 	pass "the frontend and backend certificate path roots agree"
 else
 	fail "the certificate path policy differs between the layers:"
@@ -1322,8 +1361,10 @@ for f in sorted(pathlib.Path(sys.argv[1]).rglob('*.js')):
             bad.append('%s:%d: %s' % (f.relative_to(sys.argv[1]), n, line.strip()))
 print('\n'.join(bad))
 PY
-)"
-if [ -z "$EXEC_DIRECT" ]; then
+)" || EXEC_DIRECT="__SCAN_FAILED__"
+if [ "$EXEC_DIRECT" = "__SCAN_FAILED__" ]; then
+	fail "the fs.exec_direct scan could not run - fix the guard before trusting a pass"
+elif [ -z "$EXEC_DIRECT" ]; then
 	pass "no view runs a file directly (the ACL grants no exec right)"
 else
 	fail "a view still calls fs.exec_direct, which needs the exec grant this ACL no longer has:"
@@ -1669,6 +1710,161 @@ if [ -n "$CONF_PARSED" ] && [ -z "$CONF_MISSING" ]; then
 	pass "every declared conffile exists in the package payload (root/)"
 else
 	fail "these declared conffiles are not shipped by the package, so the declaration protects nothing:$CONF_MISSING"
+fi
+
+echo "== guard 38: append_custom_dns emits the HTTPS/SVCB reject as its first DNS rule =="
+
+# The proxy path emits this reject (append_proxy_dns line 102); the custom
+# path used to rely on whatever the user wrote, so a rule that targets the
+# same query_type could shadow the safety net.  The fix (see
+# docs/linux.json 与 pro 的差距分析.md §2.2) prepends the same literal in
+# append_custom_dns.  Two checks keep that ordering:
+#
+#   (a) the literal appears in BOTH append_proxy_dns and append_custom_dns;
+#   (b) the second occurrence (the one inside append_custom_dns) comes
+#       BEFORE the user-rules loop, so a user rule cannot shadow it.
+#
+# A regression that drops the custom-path literal, or moves it after the
+# loop, would expose the user to Fake-IP bypass / HTTPS answer smuggling.
+custom_dns_uc="$SCRIPTS/generator/dns.uc"
+reject_count="$(grep -c 'query_type: *\[64, *65\]' "$custom_dns_uc")"
+if [ "$reject_count" -eq 2 ]; then
+	pass "the HTTPS/SVCB reject appears in both append_proxy_dns and append_custom_dns"
+else
+	fail "expected 2 occurrences of 'query_type: [64, 65]' in generator/dns.uc, found $reject_count"
+	fail "the custom path lost its built-in reject; see §2.2 of the gap analysis"
+fi
+
+# (b): the custom-path reject is the SECOND occurrence (append_custom_dns
+# is the second function defined).  It must come before the user-rules
+# loop, which is the first `for (let cfg in dm.dns.rules)` AFTER the
+# `const builtin_dns_rules = []` that opens the custom-path rule block.
+custom_reject_line="$(grep -n 'query_type: *\[64, *65\]' "$custom_dns_uc" | sed -n '2p' | cut -d: -f1)"
+custom_const_line="$(awk 'NR > 1 && /const builtin_dns_rules = \[\]/ { print NR; exit }' "$custom_dns_uc")"
+custom_loop_line="$(awk -v start="$custom_const_line" '
+	NR > start && /for \(let cfg in dm\.dns\.rules\)/ { print NR; exit }
+' "$custom_dns_uc")"
+
+if [ -n "$custom_reject_line" ] && [ -n "$custom_const_line" ] && [ -n "$custom_loop_line" ]; then
+	if [ "$custom_reject_line" -gt "$custom_const_line" ] && [ "$custom_reject_line" -lt "$custom_loop_line" ]; then
+		pass "append_custom_dns pushes the reject between the rules array init (line $custom_const_line) and the user-rules loop (line $custom_loop_line)"
+	else
+		fail "the reject in append_custom_dns (line $custom_reject_line) sits outside the"
+			fail "init (line $custom_const_line) -> loop (line $custom_loop_line) range; a"
+			fail "user rule could now shadow the HTTPS/SVCB reject"
+	fi
+else
+	fail "could not locate both the reject and the user-rules loop in append_custom_dns"
+fi
+
+echo "== guard 39: sniffer_advanced_mode default stays at '0' =="
+
+# §2.7 (linux.json 与 pro 的差距分析.md): the advanced-mode sniff profile
+
+# §2.7 (linux.json 与 pro 的差距分析.md): the advanced-mode sniff profile
+# (100ms / universal list) is gated behind a UCI opt-in so an upgrade
+# does not change the sniffer behaviour.  The default must remain '0';
+# the generator falls back to '0' on a missing UCI value, and the
+# package-shipped /etc/config/homeproxy must not bump the default to
+# '1' on a whim.  Two checks:
+#
+#   (a) the generator's fallback is '0';
+#   (b) the package-shipped UCI default is '0'.
+if grep -q "sniffer_advanced_mode: dm.general.sniffer_advanced_mode || '0'" "$SCRIPTS/generator/context.uc"; then
+	pass "the generator falls back to '0' on a missing sniffer_advanced_mode"
+else
+	fail "context.uc no longer falls back to '0' for sniffer_advanced_mode - the"
+		fail "sniff rule's 300ms / default-list profile is no longer the safe default"
+fi
+
+# The package default lives in root/etc/config/homeproxy.  It must be
+# '0' for upgrades to be invisible; new installs also default to the
+# same until the user opts in.
+if grep -q "^	option sniffer_advanced_mode '0'" "$ROOT/root/etc/config/homeproxy"; then
+	pass "the package-shipped /etc/config/homeproxy keeps sniffer_advanced_mode '0'"
+else
+	fail "the package default for sniffer_advanced_mode is no longer '0'; users who"
+		fail "upgraded without touching the option would silently switch to 100ms +"
+		fail "the universal sniffer list, which is a behaviour change"
+fi
+
+echo
+echo "== guard 40: rule/routing rule action enum agrees across UI and generator =="
+# The 'action' dropdown in client/common.js is the *user-visible* set the
+# form lets the user pick.  The generator's per-action gates (in dns.uc and
+# route.uc) are the *what sing-box sees* set.  When the UI ships an action
+# the generator does not know about, the form serialises a value the
+# generator then emits as `rule.action = '<unknown>'` - sing-box 1.14
+# refuses the whole config with "unknown action".  When the UI defines an
+# action the generator does not handle, sing-box refuses the action with
+# "unknown field".  Both directions matter, both directions are checked.
+#
+# Reading order:
+#   UI dns_rule actions:    extracted from common.js inside `if (is_dns) { ... }` of the
+#                            action ListValue (the values that surface when is_dns=true)
+#   UI routing_rule actions: the values outside the is_dns branch
+#   generator dns_rule:     all `'action' === '...'` literals in dns.uc's custom loop
+#   generator routing_rule: all `'action' === '...'` literals in route.uc's per-rule loop
+ACTION_ENUM="$(python3 - "$ROOT" <<'PY' || ACTION_ENUM="__SCAN_FAILED__"
+import re, sys, pathlib
+root = pathlib.Path(sys.argv[1])
+common = (root / 'htdocs/luci-static/resources/view/homeproxy/client/common.js').read_text()
+
+# Find the action ListValue block: from "ss.taboption('field_other', form.ListValue, 'action'"
+# until 'so.default = 'route'' on the next non-conditional line.  Within that
+# block, is_dns and !is_dns branches control which values get exposed.
+m = re.search(r"so = ss\.taboption\('field_other', form\.ListValue, 'action'.*?so\.default = 'route'",
+              common, re.DOTALL)
+if not m:
+    print('__SCAN_FAILED__')
+    sys.exit()
+
+block = m.group(0)
+# Inside the if (is_dns) { ... } else { ... }, collect value('xxx', ...) names.
+# The else branch is "routing_rule actions"; the if branch is "dns_rule actions".
+is_dns_m = re.search(r"if \(is_dns\) \{(.*?)\} else \{(.*?)\}", block, re.DOTALL)
+if not is_dns_m:
+    print('__SCAN_FAILED__')
+    sys.exit()
+
+def actions(branch):
+    return set(re.findall(r"so\.value\('([^']+)'", branch))
+
+dns_actions = actions(is_dns_m.group(1))
+routing_actions = actions(is_dns_m.group(2))
+
+dns_uc = (root / 'root/etc/homeproxy/scripts/generator/dns.uc').read_text()
+route_uc = (root / 'root/etc/homeproxy/scripts/generator/route.uc').read_text()
+
+def gates(text):
+    return set(re.findall(r"cfg\.action === '([^']+)'", text))
+
+dns_gates = gates(dns_uc)
+route_gates = gates(route_uc)
+
+problems = []
+ui_extra = dns_actions - dns_gates
+if ui_extra:
+    problems.append(f'dns_rule UI exposes {sorted(ui_extra)} but generator/dns.uc does not gate on them')
+gates_extra = dns_gates - dns_actions - {'route-options'}  # generator-internal sentinel
+# (Above: dns_gates may include 'route-options' from old guard; clean ignore.)
+# A gate the UI does not offer is fine if the generator never emits it (matches),
+# but we should still flag if it could be reached from UCI (impossible here because the ListValue is the only writer).
+
+ui_extra_r = routing_actions - route_gates
+if ui_extra_r:
+    problems.append(f'routing_rule UI exposes {sorted(ui_extra_r)} but generator/route.uc does not gate on them')
+
+print('\n'.join(problems))
+PY
+)"
+if [ "$ACTION_ENUM" = "__SCAN_FAILED__" ]; then
+	fail "the rule action enum scan could not run - fix the guard before trusting a pass"
+elif [ -z "$ACTION_ENUM" ]; then
+	pass "every rule action in the UI dropdown is gated by the matching generator"
+else
+	fail "the rule action enum drifted between the UI and the generator:"
+	printf '      %s\n' "$ACTION_ENUM"
 fi
 
 echo

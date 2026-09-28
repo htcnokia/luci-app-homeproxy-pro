@@ -149,8 +149,15 @@ hp_net_teardown() {
 }
 
 # hp_net_remove_tun
-# service_stopped() hook: procd calls it after the instances are gone, so the
-# TUN device can be removed.  Requires config_load.
+# service_stopped() hook on the genuine-stop path only (HP_RELOAD_IN_PROGRESS=0):
+# procd calls it after the instances are gone, so the TUN device can be removed.
+# Requires config_load.
+#
+# On the reload path (HP_RELOAD_IN_PROGRESS=1) the caller skips this entirely,
+# so the device survives across the stop;start that reload_service drives; the
+# table-100 default route is therefore not pulled mid-reload - the
+# "tun mode reload exposes the LAN with the real IP" failure that the previous
+# TODO documented (review P2, 2026-09-28) is the issue the caller now closes.
 hp_net_remove_tun() {
 	local tun_name
 

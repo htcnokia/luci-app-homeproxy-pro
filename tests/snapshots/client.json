@@ -321,6 +321,19 @@
 					}
 				},
 				{
+					"kind": "Flag",
+					"name": "sniffer_advanced_mode",
+					"title": "Sniffer: advanced mode (100ms, universal list)",
+					"description": "Use the tutorial-recommended sniffer profile (100ms timeout, http/tls/stun/quic/dns). Default keeps the 300ms / unconstrained-list behaviour.",
+					"depends": [],
+					"values": [],
+					"subsection": null,
+					"props": {
+						"default": "0",
+						"rmempty": false
+					}
+				},
+				{
 					"kind": "SectionValue",
 					"name": "_routing",
 					"description": "routing",
@@ -1055,12 +1068,12 @@
 										"Route"
 									],
 									[
-										"route-options",
-										"Route options"
-									],
-									[
 										"reject",
 										"Reject"
+									],
+									[
+										"route-options",
+										"Route options"
 									],
 									[
 										"resolve",
@@ -1102,10 +1115,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1124,10 +1133,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1146,10 +1151,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1167,10 +1168,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1188,10 +1185,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1210,10 +1203,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1231,10 +1220,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1271,10 +1256,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -1293,10 +1274,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									],
 									[
 										"tls_spoof",
@@ -2395,10 +2372,6 @@
 										"Route"
 									],
 									[
-										"route-options",
-										"Route options"
-									],
-									[
 										"reject",
 										"Reject"
 									],
@@ -2450,10 +2423,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -2471,10 +2440,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],
@@ -2493,10 +2458,6 @@
 									[
 										"action",
 										"route"
-									],
-									[
-										"action",
-										"route-options"
 									]
 								],
 								"values": [],

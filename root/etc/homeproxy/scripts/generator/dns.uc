@@ -155,9 +155,59 @@ function append_proxy_dns(config, dm, ctx) {
 	}
 }
 
+/* Known DoH/DoT/DoQ hostnames and the IPs we should pin them to. The
+ * table is consulted by append_custom_dns() to detect when a user
+ * configured one of these encrypted upstreams; without the predefined
+ * entry, the resolver itself has to be resolved through the system DNS,
+ * and a DNS outage of any kind taken once out leaves the resolver
+ * unreachable - a chicken-and-egg loop. Mirrors the hosts server in
+ * linux.json line 10; see docs/linux.json 与 pro 的差距分析.md §2.4.
+ *
+ * Additions go here when the user's pool of encrypted resolvers grows;
+ * a new entry needs no code change beyond this table. */
+const KNOWN_ENCRYPTED_DNS_HOSTS = {
+	'doh.pub':         ['1.12.12.21', '120.53.53.53'],
+	'dns.pub':         ['1.12.12.21', '120.53.53.53'],
+	'dns.alidns.com':  ['223.5.5.5', '223.6.6.6'],
+	'dns.google':      ['8.8.8.8', '8.8.4.4'],
+	'one.one.one.one': ['1.1.1.1', '1.0.0.1']
+};
+
 /* --- custom routing-mode path (user-defined dns_server / dns_rule) ----- */
 
 function append_custom_dns(config, dm, ctx) {
+	/* §2.4 DoH fallback. Pre-emit a hosts-type DNS server pinning any
+	 * encrypted-resolver hostname the user configured to its real IPs. The
+	 * loop also remembers which server sections hit the table, so the user
+	 * server loop below can stamp `domain_resolver: 'hp-dns-hosts'` onto
+	 * them - sing-box only consults the hosts table for resolvers that
+	 * explicitly point at it, mirroring linux.json line 7
+	 * (`{"domain_resolver": "hosts"}`). Without the stamp, the resolver
+	 * still has to look up its own hostname through the system DNS and the
+	 * chicken-and-egg loop we are trying to break stays open. */
+	let doh_predefined = null;
+	const doh_resolved_hosts = {};
+	for (let cfg in (dm.dns.servers || [])) {
+		if (!cfg.enabled)
+			continue;
+		if (cfg.type !== 'https' && cfg.type !== 'tls' && cfg.type !== 'quic')
+			continue;
+		const host = cfg.server;
+		if (!host || !KNOWN_ENCRYPTED_DNS_HOSTS[host])
+			continue;
+		if (!doh_predefined)
+			doh_predefined = {};
+		doh_predefined[host] = KNOWN_ENCRYPTED_DNS_HOSTS[host];
+		doh_resolved_hosts[cfg.name] = true;
+	}
+	if (doh_predefined) {
+		push(config.dns.servers, {
+			tag: 'hp-dns-hosts',
+			type: 'hosts',
+			predefined: doh_predefined
+		});
+	}
+
 	/* DNS servers */
 	for (let cfg in dm.dns.servers) {
 		if (!cfg.enabled)
@@ -178,10 +228,12 @@ function append_custom_dns(config, dm, ctx) {
 				enabled: true,
 				server_name: cfg.tls_sni
 			} : null,
-			domain_resolver: (cfg.address_resolver || cfg.address_strategy) ? {
-				server: get_resolver(cfg.address_resolver || ctx.dns_default_server, dm),
-				strategy: cfg.address_strategy
-			} : null,
+			domain_resolver: doh_resolved_hosts[cfg.name]
+				? 'hp-dns-hosts'
+				: ((cfg.address_resolver || cfg.address_strategy) ? {
+					server: get_resolver(cfg.address_resolver || ctx.dns_default_server, dm),
+					strategy: cfg.address_strategy
+				} : null),
 			detour: outbound
 		});
 	}
@@ -190,10 +242,33 @@ function append_custom_dns(config, dm, ctx) {
 	/* sing-box >= 1.14: legacy address-filter rules are auto-wrapped with an
 	   evaluate action; deprecated strategy/accept_empty fields are dropped. */
 	const builtin_dns_rules = [];
+	/* §2.2 First safe rule: reject SVCB (qtype 64) and HTTPS (qtype 65)
+	 * queries. A client that learns the answer from these record types
+	 * connects to the embedded IP without going through the resolver again,
+	 * which makes Fake-IP and any route that hinges on A/AAAA resolution
+	 * bypass. Mirrors append_proxy_dns() line 102; emit here as the FIRST
+	 * entry so a user rule that targets the same query_type cannot shadow
+	 * it (sing-box walks the array in order and stops at the first match).
+	 * Without this prefix, a user who adds a higher-priority rule on the
+	 * same query_type in custom mode loses Fake-IP integrity. */
+	push(builtin_dns_rules, {
+		query_type: [64, 65],
+		action: 'reject'
+	});
 	for (let cfg in dm.dns.rules) {
 		if (!cfg.enabled)
 			continue;
 
+		/* Match fields are valid for every action; action-specific fields
+		 * are emitted below per sing-box 1.14's per-action schema.  The
+		 * previous code dumped server/method/no_drop/rcode/answer/ns/extra
+		 * (and the cache / TTL / client-subnet family) onto every rule
+		 * regardless of action, and sing-box then rejected the whole
+		 * configuration with "json: unknown field" the moment a user
+		 * changed a rule's action and left the old fields in UCI -
+		 * LuCI's form value parsing does not delete the previous value
+		 * when a depends() guard hides it, the same path route.uc
+		 * already had to fix. */
 		const rule = {
 			ip_version: strToInt(cfg.ip_version),
 			query_type: parse_dnsquery(cfg.query_type),
@@ -218,21 +293,38 @@ function append_custom_dns(config, dm, ctx) {
 			invert: strToBool(cfg.invert),
 			race: strToBool(cfg.race),
 			speculative: strToBool(cfg.speculative),
-			action: cfg.action,
-			server: get_resolver(cfg.server, dm),
-			disable_cache: strToBool(cfg.dns_disable_cache),
-			disable_optimistic_cache: strToBool(cfg.disable_optimistic_cache),
-			rewrite_ttl: strToInt(cfg.rewrite_ttl),
-			timeout: strToTime(cfg.dns_timeout),
-			client_subnet: cfg.client_subnet,
-			remove_client_subnet: strToBool(cfg.remove_client_subnet),
-			method: cfg.reject_method,
-			no_drop: strToBool(cfg.reject_no_drop),
-			rcode: cfg.predefined_rcode,
-			answer: cfg.predefined_answer,
-			ns: cfg.predefined_ns,
-			extra: cfg.predefined_extra
+			action: cfg.action
 		};
+
+		/* `route` (and `evaluate`, which needs a server for the eval step).
+		 * `resolve` is also a possibility but is not currently exposed in
+		 * the UI; if it ever is, this branch is where it lands. */
+		if (cfg.action === 'route' || cfg.action === 'evaluate' || cfg.action === 'resolve') {
+			rule.server = get_resolver(cfg.server, dm);
+			rule.disable_cache = strToBool(cfg.dns_disable_cache);
+			rule.disable_optimistic_cache = strToBool(cfg.disable_optimistic_cache);
+			rule.rewrite_ttl = strToInt(cfg.rewrite_ttl);
+			rule.client_subnet = cfg.client_subnet;
+			rule.remove_client_subnet = strToBool(cfg.remove_client_subnet);
+		}
+
+		if (cfg.action === 'route' || cfg.action === 'resolve')
+			rule.timeout = strToTime(cfg.dns_timeout);
+
+		/* `reject` only accepts method + no_drop.  Anything else here is
+		 * an unknown field for the action and the whole config fails. */
+		if (cfg.action === 'reject') {
+			rule.method = cfg.reject_method;
+			rule.no_drop = strToBool(cfg.reject_no_drop);
+		}
+
+		/* `predefined` only accepts rcode + answer + ns + extra. */
+		if (cfg.action === 'predefined') {
+			rule.rcode = cfg.predefined_rcode;
+			rule.answer = cfg.predefined_answer;
+			rule.ns = cfg.predefined_ns;
+			rule.extra = cfg.predefined_extra;
+		}
 
 		if (cfg.action === 'evaluate')
 			rule.tag = cfg.evaluate_tag || null;
