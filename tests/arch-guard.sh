@@ -2409,6 +2409,392 @@ else
 fi
 
 echo
+echo "== guard 50: the rule-set path policy is identical in both layers =="
+
+# The rule-set form's `path` and `initial_path` were bare form.Value options
+# with datatype='file', which in LuCI is `file() { return true; }` - so any
+# string saved, and the generator was the first thing to object.  Adding a
+# frontend validator means the same class of bug guard 29 pins for
+# certificates can now happen here instead: two lists, one per language, and
+# nothing able to see across the JS/ucode boundary.
+#
+# The failure is asymmetric on purpose.  A path the UI rejects but the backend
+# accepts is a UI bug; a path the UI accepts but the backend drops is the
+# dangerous one - the field vanishes from the generated configuration, the
+# rule-set silently reverts to a blocking first download, and the user is left
+# with a configuration that looks configured.  The generator now also refuses
+# loudly, but the UI check is what stops it at the field they are editing.
+#
+# Compared in BOTH directions, and also against the two places the policy has
+# to stay coherent beyond the lists themselves: the message the validator
+# shows, and the path the form offers as its placeholder / datalist entry.  A
+# placeholder naming a directory the validator refuses is the bug this guard
+# exists for, wearing a different hat.
+RULE_ROOTS="$(python3 - "$SCRIPTS/homeproxy.uc" "$VIEWS/homeproxy.js" "$VIEWS" <<'PY'
+import re, sys
+
+def roots(path, name, label):
+    text = open(path, encoding='utf-8').read()
+    m = re.search(r'\b%s\s*=\s*\[([^\]]*)\]' % name, text)
+    if not m:
+        return None, '%s: could not find %s' % (label, name)
+    return re.findall(r"'([^']+)'", m.group(1)), None
+
+problems = []
+backend, err = roots(sys.argv[1], 'RULE_PATH_ROOTS', 'homeproxy.uc')
+problems += [err] if err else []
+frontend, err = roots(sys.argv[2], 'HP_RULE_PATH_ROOTS', 'homeproxy.js')
+problems += [err] if err else []
+
+if not problems:
+    if backend != frontend:
+        problems.append('homeproxy.uc %s != homeproxy.js %s' % (backend, frontend))
+    elif not backend:
+        problems.append('RULE_PATH_ROOTS is empty - the rule-set gate would accept nothing')
+    else:
+        # Every root has to exist in the packaged tree, or the form points the
+        # user at a directory the package never creates.  uci-defaults creates
+        # the archive at install time and hp_prepare_ruleset_dir() before every
+        # generation, so the literal root string has to be the one those two
+        # agree on - a rename of the archive in only one of the three places
+        # would leave the user with an unsavable form.
+        for src, label in ((sys.argv[1], 'homeproxy.uc'), (sys.argv[2], 'homeproxy.js')):
+            text = open(src, encoding='utf-8').read()
+            for r in backend:
+                if r not in text:
+                    problems.append('%s does not mention the root %s' % (label, r))
+
+        # The offered default must be inside a declared root, and it must be
+        # the same string the frontend exposes as hp.rule_path_default.
+        js = open(sys.argv[2], encoding='utf-8').read()
+        m = re.search(r"\bHP_RULE_PATH_DEFAULT\s*=\s*'([^']+)'", js)
+        if not m:
+            problems.append('homeproxy.js: could not find HP_RULE_PATH_DEFAULT')
+        elif not any(m.group(1).startswith(r) and len(m.group(1)) > len(r) for r in backend):
+            problems.append('HP_RULE_PATH_DEFAULT %r is not inside any RULE_PATH_ROOTS entry %s'
+                            % (m.group(1), backend))
+        if not re.search(r'\brule_path_default:\s*HP_RULE_PATH_DEFAULT\b', js):
+            problems.append('homeproxy.js: HP_RULE_PATH_DEFAULT is not exported as rule_path_default,'
+                            ' so the view cannot quote it and would repeat the literal')
+
+        # The validator the rule-set form binds must be the one that closes
+        # over this list.  A form option pointing at the certificate validator
+        # would accept /etc/ssl/ and refuse the archive.
+        for view in ('client/subscription.js',):
+            body = open('%s/view/homeproxy/%s' % (sys.argv[3], view), encoding='utf-8').read()
+            for field in ('path', 'initial_path'):
+                m = re.search(r"option\(form\.Value,\s*'%s'.*?(?=so = |\Z)" % field, body, re.S)
+                if not m:
+                    problems.append('%s: no %s option found' % (view, field))
+                elif 'hp.validateRuleSetPath' not in m.group(0):
+                    problems.append('%s: the %s option does not bind hp.validateRuleSetPath'
+                                    % (view, field))
+
+print('\n'.join(problems))
+PY
+)" || RULE_ROOTS="__SCAN_FAILED__"
+if [ "$RULE_ROOTS" = "__SCAN_FAILED__" ]; then
+	fail "the rule-set-roots scan could not run - fix the guard before trusting a pass"
+elif [ -z "$RULE_ROOTS" ]; then
+	pass "the frontend and backend rule-set path roots agree, and the offered default is inside them"
+else
+	fail "the rule-set path policy is not coherent across the layers:"
+	printf '      %s\n' "$RULE_ROOTS"
+fi
+
+echo
+echo "== guard 51: the format probe stays a probe, and the form stops fighting it =="
+
+# issue #7 batch 1 turned a comment into a mechanism: generation reads the first
+# bytes of each rule-set file and declares `format` from that, and a bare
+# `update_interval` is normalised before sing-box parses it as a Go duration.
+#
+# Every part of that is a decision that can be undone by a well-meaning edit,
+# and each reversion reproduces a failure that is invisible until a router
+# refuses to start:
+#
+#   (a) the disk half of the probe moving under generator/ - the purity
+#       invariant guard 27 protects, but at a different boundary than the one
+#       it watches (guard 27 bans the fs/ubus IMPORT; this bans the CALL, so
+#       a generator could reach the disk through a helper in homeproxy.uc and
+#       still pass guard 27)
+#   (b) the probe reimplemented on isBinary() - which answers "is this text?",
+#       a question correlated with the format rather than equal to it (see the
+#       comment on ruleSetFormatFromBytes for why that correlation is luck)
+#   (c) update_interval passing through raw again, which is the measured
+#       `time: missing unit in duration "3600"` hard failure
+#   (d) the form's `format` option growing a default back, which is what made
+#       "add a local rule-set, pick my .json, forget Format" produce a
+#       configuration that parsed JSON as a compiled .srs
+#   (e) the update_interval placeholder showing a unit Go cannot read, which
+#       is how `1d` got there in the first place
+PROBE="$(python3 - "$SCRIPTS" "$VIEWS" <<'PY'
+import pathlib, re, sys
+
+scripts, views = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+ruleset_uc = (scripts / 'generator' / 'ruleset.uc').read_text(encoding='utf-8')
+homeproxy_uc = (scripts / 'homeproxy.uc').read_text(encoding='utf-8')
+client_uc = (scripts / 'generate_client.uc').read_text(encoding='utf-8')
+sub_js = (views / 'view' / 'homeproxy' / 'client' / 'subscription.js').read_text(encoding='utf-8')
+problems = []
+
+# (a) Only the process boundary may touch the disk for a probe.
+for f in sorted((scripts / 'generator').glob('*.uc')):
+    body = f.read_text(encoding='utf-8')
+    if re.search(r'\bprobeRuleSetFile\s*\(', re.sub(r'/\*[\s\S]*?\*/', '', body)):
+        problems.append('%s calls probeRuleSetFile(); only the CLI may read a rule-set file'
+                        % f.name)
+if not re.search(r'\bprobeRuleSetFile\s*\(', re.sub(r'/\*[\s\S]*?\*/', '', client_uc)):
+    problems.append('generate_client.uc no longer probes the rule-set files, so ruleset_formats '
+                    'is never populated and the correction in ruleset.uc can never fire')
+
+# (b) The magic is compared byte by byte, and isBinary() is not the test.
+m = re.search(r'export function ruleSetFormatFromBytes\([^)]*\)\s*\{(.*?)\n\};', homeproxy_uc, re.S)
+if not m:
+    problems.append('homeproxy.uc: ruleSetFormatFromBytes() is gone; nothing decides the format')
+else:
+    body = re.sub(r'/\*[\s\S]*?\*/', '', m.group(1))
+    for byte in ('0x53', '0x52'):
+        if byte not in body:
+            problems.append('ruleSetFormatFromBytes() no longer compares the SRS magic byte %s' % byte)
+    if re.search(r'\bisBinary\s*\(', body):
+        problems.append('ruleSetFormatFromBytes() calls isBinary(); that answers "is this text?", '
+                        'which is correlated with the rule-set format rather than equal to it')
+
+# (c) update_interval is normalised, not forwarded.
+if 'strToTime(cfg.update_interval)' not in ruleset_uc:
+    problems.append("ruleset.uc no longer runs update_interval through strToTime(); a bare number "
+                    "goes to sing-box as `missing unit in duration`")
+if re.search(r'update_interval:\s*cfg\.update_interval\b', ruleset_uc):
+    problems.append('ruleset.uc forwards update_interval raw again')
+
+# (d)/(e) The rule-set form must not re-introduce the two UI defects.
+def option_block(src, name):
+    m = re.search(r"option\(form\.\w+,\s*'%s'.*?(?=\n\tso = |\n\t/\* Rule set settings end)" % name,
+                  src, re.S)
+    return m.group(0) if m else None
+
+fmt = option_block(sub_js, 'format')
+if fmt is None:
+    problems.append('subscription.js: the format option is gone')
+else:
+    if re.search(r'\bso\.default\s*=', fmt):
+        problems.append("the rule-set form gives `format` a default again; an explicit value beats "
+                        "sing-box's extension inference, so every local rule-set ships a format that "
+                        "may contradict its own file")
+    if not re.search(r'\bso\.rmempty\s*=\s*true', fmt):
+        problems.append("the rule-set form's `format` is not rmempty; nothing can be left unset, so "
+                        "the generator's read-the-bytes correction is the only thing standing between "
+                        "a user and a rejected configuration")
+
+iv = option_block(sub_js, 'update_interval')
+if iv is None:
+    problems.append('subscription.js: the update_interval option is gone')
+else:
+    if not re.search(r'\bso\.validate\s*=', iv):
+        problems.append('update_interval has no validator, so a unit Go cannot read reaches sing-box '
+                        'and rejects the whole configuration at apply time')
+    m = re.search(r"so\.placeholder\s*=\s*'([^']*)'", iv)
+    if not m:
+        problems.append('update_interval has no placeholder')
+    elif not re.fullmatch(r'(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+', m.group(1)):
+        problems.append("the update_interval placeholder %r is not a Go duration; Go's units are "
+                        "ns/us/ms/s/m/h, and a placeholder is the value users copy verbatim"
+                        % m.group(1))
+
+print('\n'.join(problems))
+PY
+)" || PROBE="__SCAN_FAILED__"
+if [ "$PROBE" = "__SCAN_FAILED__" ]; then
+	fail "the format-probe scan could not run - fix the guard before trusting a pass"
+elif [ -z "$PROBE" ]; then
+	pass "the format probe reads only at the process boundary, decides on the magic,"
+	pass "  normalises update_interval, and the form neither defaults nor misleads"
+else
+	fail "the format probe / duration normalisation has been undone:"
+	printf '      %s\n' "$PROBE"
+fi
+
+echo
+echo "== guard 52: the startup fallback stays opt-in, and the two sides stay in step =="
+
+# ruleset_safe_start points every remote rule-set that has no initial file of
+# its own at an EMPTY rule-set, so sing-box starts immediately instead of
+# fetching during initialization - before the inbounds bind.  On a cold cache
+# that is the difference between a router that comes up and one that waits on
+# raw.githubusercontent.com, through the node, before it will listen at all.
+#
+# It is opt-in because the fallback is empty on purpose: a rule-set with no
+# rules matches nothing, so everything it would have split falls through to
+# `final`.  On bypass_mainland_china that means mainland destinations can be
+# proxied until the download succeeds.  That is a routing change, so the
+# default must stay off, exactly as sniffer_advanced_mode's does.
+#
+# The rest of the guard is about the mechanism being one mechanism: the CLI
+# writes the file and the generator points at it, and a disagreement between
+# them is silent and fatal (a wrong-format or missing initial file is ignored
+# by sing-box, which then blocks startup exactly as if none existed).
+SAFE_START="$(python3 - "$ROOT" "$SCRIPTS" <<'PY'
+import pathlib, re, sys
+
+root, scripts = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+config_uc = (root / 'root/etc/config/homeproxy').read_text(encoding='utf-8')
+context_uc = (scripts / 'generator/context.uc').read_text(encoding='utf-8')
+route_uc = (scripts / 'generator/route.uc').read_text(encoding='utf-8')
+ruleset_uc = (scripts / 'generator/ruleset.uc').read_text(encoding='utf-8')
+common_uc = (scripts / 'generator/common.uc').read_text(encoding='utf-8')
+homeproxy_uc = (scripts / 'homeproxy.uc').read_text(encoding='utf-8')
+client_uc = (scripts / 'generate_client.uc').read_text(encoding='utf-8')
+problems = []
+
+def strip_comments(src):
+    src = re.sub(r'/\*[\s\S]*?\*/', '', src)
+    return '\n'.join(l for l in src.split('\n') if not l.lstrip().startswith(('#', '//', '*')))
+
+# (a) The default, in both places it is stated.  Same shape as guard 39.
+if "ruleset_safe_start: dm.general.ruleset_safe_start || '0'" not in context_uc:
+    problems.append("context.uc no longer falls back to '0' for ruleset_safe_start; a missing "
+                    "UCI value would have to mean something other than the safe default")
+if not re.search(r"^\toption ruleset_safe_start '0'$", config_uc, re.M):
+    problems.append("the package-shipped /etc/config/homeproxy no longer ships ruleset_safe_start "
+                    "'0'; upgrading users would silently start routing with empty rule-sets")
+
+# (b) An initial_path may only be emitted for a fallback that exists.  Both
+#     sites, because one without the other is the silent failure.
+if "ctx.ruleset_initial" not in strip_comments(route_uc):
+    problems.append('route.uc emits initial_path without checking ctx.ruleset_initial; a built-in '
+                    'could be pointed at a file the CLI never wrote')
+if "ctx.ruleset_initial" not in strip_comments(ruleset_uc):
+    problems.append('ruleset.uc emits initial_path without checking ctx.ruleset_initial')
+if 'ruleset_initial' not in client_uc:
+    problems.append('generate_client.uc no longer writes the fallbacks, so ctx.ruleset_initial is '
+                    'always empty and the opt-in does nothing')
+
+# (c) The built-ins come from the shared list.  route.uc hard-coding the tags
+#     is how the two readers drifted in the first place: the CLI had no idea
+#     these rule-sets existed.
+for tag in ('geoip-cn', 'geosite-cn'):
+    if re.search(r"tag:\s*'%s'" % re.escape(tag), strip_comments(route_uc)):
+        problems.append("route.uc hard-codes tag '%s' again; it must come from "
+                        "BUILTIN_REMOTE_RULE_SETS so the CLI can create its fallback" % tag)
+if 'BUILTIN_REMOTE_RULE_SETS' not in route_uc:
+    problems.append('route.uc no longer reads BUILTIN_REMOTE_RULE_SETS')
+if 'BUILTIN_REMOTE_RULE_SETS' not in client_uc:
+    problems.append('generate_client.uc no longer reads BUILTIN_REMOTE_RULE_SETS')
+
+# (d) The shipped constant, byte for byte.  It is a binary artifact in the
+#     tree, and a corrupted one fails in the worst possible way: sing-box
+#     cannot parse the initial file, ignores it, and blocks startup - the
+#     exact failure the file exists to prevent.  Comparing the bytes here is
+#     the only thing standing between a bad `cp` and that.
+expected_srs = bytes([0x53, 0x52, 0x53, 0x02, 0x78, 0xDA, 0x62, 0x00,
+                      0x0C, 0x00, 0x00, 0x01, 0x00, 0x01])
+srs = root / 'root/etc/homeproxy/ruleset/initial/empty.srs'
+src = root / 'root/etc/homeproxy/ruleset/initial/empty.source.json'
+if not srs.is_file():
+    problems.append('the offline fallback %s is missing from the package payload' % srs)
+elif srs.read_bytes() != expected_srs:
+    problems.append('%s is %s, not the documented %s; it is the last-resort binary '
+                    'fallback and a corrupted one makes sing-box block startup'
+                    % (srs.name, srs.read_bytes().hex(' '), expected_srs.hex(' ')))
+if not src.is_file():
+    problems.append('the empty source %s is missing from the package payload' % src)
+elif src.read_bytes() != b'{"version":3,"rules":[]}':
+    problems.append('%s is %r, not the documented empty source' % (src.name, src.read_bytes()))
+
+# (e) The fallbacks live inside the rule-set archive, so the existing jail
+#     mount of HP_DIR and the existing path whitelist both already cover them.
+#     A directory outside the archive would need a whitelist change and a new
+#     jail mount, and neither exists.
+m = re.search(r"RULESET_INITIAL_DIR\s*=\s*HP_DIR \+ '([^']*)'", homeproxy_uc)
+if not m:
+    problems.append('RULESET_INITIAL_DIR is gone or no longer derived from HP_DIR')
+elif not m.group(1).startswith('/ruleset/'):
+    problems.append('RULESET_INITIAL_DIR is %r, outside the rule-set archive; the jail mount and '
+                    'the path whitelist would not cover it' % m.group(1))
+if 'RULESET_INITIAL_DIR' not in common_uc and 'BUILTIN_REMOTE_RULE_SETS' not in common_uc:
+    problems.append('common.uc no longer carries the shared built-in list')
+
+print('\n'.join(problems))
+PY
+)" || SAFE_START="__SCAN_FAILED__"
+if [ "$SAFE_START" = "__SCAN_FAILED__" ]; then
+	fail "the safe-start scan could not run - fix the guard before trusting a pass"
+elif [ -z "$SAFE_START" ]; then
+	pass "the startup fallback is opt-in, both sides read one shared list, and the"
+	pass "  shipped constant is byte-for-byte the documented one"
+else
+	fail "the startup fallback has been broken or silently enabled:"
+	printf '      %s\n' "$SAFE_START"
+fi
+
+echo
+echo "== guard 53: every dm.general field the generators read is one the Loader lists =="
+
+# config.general in the Loader is an EXPLICIT key list, not a pass-through of
+# the UCI section.  A field read as `dm.general.foo` that is not in that list
+# does not read as "absent" - it reads as "never set", and a `|| '0'` fallback
+# in context.uc then makes it indistinguishable from a user who deliberately
+# left the option off.
+#
+# That is not a hypothetical.  ruleset_safe_start was added to
+# /etc/config/homeproxy and read in context.uc, and nothing said the key was
+# missing: the configuration generated cleanly, `sing-box check` passed, every
+# test that did not look for the feature's effect was green, and the feature
+# was simply never on.  Only the e2e case that asserts an initial_path exists
+# could see it, and it read as a generator bug.
+#
+# So this compares the two lists mechanically.  The read set is derived from
+# what the code actually says, not from a hand-kept list, so a new option
+# cannot be added to one side and forgotten on the other.
+GENERAL_KEYS="$(python3 - "$SCRIPTS" <<'PY'
+import pathlib, re, sys
+
+scripts = pathlib.Path(sys.argv[1])
+loader = (scripts / 'config/loader.uc').read_text(encoding='utf-8')
+
+# What the Loader declares on config.general.
+m = re.search(r'config\.general\s*=\s*\{(.*?)\n\t\t\};', loader, re.S)
+if not m:
+    print('config/loader.uc: could not find the config.general object literal')
+    raise SystemExit(0)
+declared = set(re.findall(r'^\s*([a-z][a-z0-9_]*)\s*:', m.group(1), re.M))
+
+# What the consumers read off dm.general.  Comments stripped first: the prose
+# above ruleset_safe_start names dm.general.ruleset_safe_start on purpose, and a
+# substring search would read that as a use.
+def strip(src):
+    src = re.sub(r'/\*[\s\S]*?\*/', '', src)
+    return '\n'.join(l for l in src.split('\n') if not l.lstrip().startswith(('#', '//')))
+
+readers = ['generator/context.uc', 'generate_client.uc']
+readers += [str(p.relative_to(scripts)) for p in sorted((scripts / 'generator').glob('*.uc'))]
+
+problems = []
+for rel in dict.fromkeys(readers):
+    f = scripts / rel
+    if not f.is_file():
+        continue
+    src = strip(f.read_text(encoding='utf-8'))
+    for key in sorted(set(re.findall(r'\bdm\.general\.([a-z][a-z0-9_]*)', src))):
+        if key not in declared:
+            problems.append('%s reads dm.general.%s, which the Loader does not declare - '
+                            'the value is always null there, so a `||` fallback makes the '
+                            'option indistinguishable from one the user never set' % (rel, key))
+
+print('\n'.join(problems))
+PY
+)" || GENERAL_KEYS="__SCAN_FAILED__"
+if [ "$GENERAL_KEYS" = "__SCAN_FAILED__" ]; then
+	fail "the general-key scan could not run - fix the guard before trusting a pass"
+elif [ -z "$GENERAL_KEYS" ]; then
+	pass "every dm.general field the generators and the CLI read is declared by the Loader"
+else
+	fail "the Loader and its consumers disagree about the config section's keys:"
+	printf '      %s\n' "$GENERAL_KEYS"
+fi
+
+echo
 printf '%s checks, %s failures\n' "$checks" "$([ "$FAILED" = 0 ] && echo 0 || echo 'nonzero')"
 if [ "$FAILED" != 0 ]; then
 	echo "ARCHITECTURE GUARD FAILED"

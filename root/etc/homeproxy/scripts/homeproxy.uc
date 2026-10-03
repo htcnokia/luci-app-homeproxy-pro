@@ -118,6 +118,330 @@ export function validateCertificatePath(p) {
 	return false;
 };
 
+/* Rule-set source files: the `path` of a `type: local` rule_set and the
+ * `initial_path` of a `type: remote` one.  sing-box opens both as root, so
+ * the threat model is the certificate one - an arbitrary UCI value would leak
+ * the file to anyone who can write the UCI tree from anywhere on the LAN.
+ *
+ * Unlike a certificate, a rule-set has exactly one home: the archive this
+ * package creates at install time (uci-defaults/luci-homeproxy) and before
+ * every generation (runtime/service.sh's hp_prepare_ruleset_dir).  So the
+ * policy is a single root rather than the three a certificate needs, and it
+ * is deliberately NARROWER than validateHomeProxyPath() - that gate also
+ * accepts /tmp/homeproxy_*, which exists for upload staging, and every path
+ * under /etc/homeproxy/ including the resource lists the package itself
+ * rewrites.  A rule-set belongs in the archive (issue #7, review 4.4/4.7).
+ *
+ * Kept as a third policy rather than folded into validateHomeProxyPath() for
+ * the reason validateCertificatePath() is: the policies have to be
+ * independently narrowable, and folding them back together is exactly how the
+ * certificate one regressed once already - a path the UI offered was accepted
+ * there and silently dropped here, so the TLS listener failed with nothing
+ * pointing at the path.
+ *
+ * The list is mirrored by HP_RULE_PATH_ROOTS in
+ * htdocs/luci-static/resources/homeproxy.js; guard 50 in tests/arch-guard.sh
+ * keeps the two in step across the JS/ucode boundary, which nothing else can
+ * see. */
+export const RULE_PATH_ROOTS = ['/etc/homeproxy/ruleset/'];
+
+/* validateRuleSetPath(p) - the rule-set path gate.
+ *
+ * Same shape as validateCertificatePath(): reject traversal and relative
+ * paths, then require one of RULE_PATH_ROOTS.  A bare root ("/etc/homeproxy/
+ * ruleset/" with nothing after it) is rejected - it names the directory, not
+ * a file. */
+export function validateRuleSetPath(p) {
+	if (!p || type(p) !== 'string')
+		return false;
+
+	/* Reject traversal *before* the prefix checks: a plain prefix comparison
+	 * accepts '/etc/homeproxy/ruleset/../../etc/shadow', and sing-box reads
+	 * these paths as root. */
+	if (match(p, /(^|\/)\.\.(\/|$)/))
+		return false;
+
+	/* Reject anything that does not start with '/' - a relative path in
+	 * sing-box resolves against the process CWD. */
+	if (substr(p, 0, 1) !== '/')
+		return false;
+
+	for (let root in RULE_PATH_ROOTS)
+		if (length(p) > length(root) && substr(p, 0, length(root)) === root)
+			return true;
+
+	return false;
+};
+
+/* RULE_PATH_ROOTS rendered for a diagnostic.
+ *
+ * join(', ', RULE_PATH_ROOTS) would do this in one line - it is the form
+ * firewall_utils.uc uses for its own lists, and ucode's join() does flatten an
+ * array argument rather than stringifying it.  The loop is kept anyway: it
+ * cannot be wrong about the separator, and this string ends up inside a die()
+ * a user reads in a log file. */
+export function rulePathRootsText() {
+	let text = '';
+
+	for (let root in RULE_PATH_ROOTS)
+		text = text ? (text + ', ' + root) : root;
+
+	return text;
+};
+
+/* --- rule-set format probing ---------------------------------------------
+ *
+ * A rule-set comes in exactly two formats, and sing-box needs to be told
+ * which one it is looking at:
+ *
+ *   source  a JSON document, {"version":3,"rules":[...]}
+ *   binary  a compiled .srs, which starts with the three ASCII bytes "SRS"
+ *
+ * The field is optional, because sing-box infers it from the file extension
+ * (.json -> source, .srs -> binary).  That inference is a guess about the
+ * NAME, and it is wrong in three ways that all end the same way - `sing-box
+ * check` rejects the whole configuration, so a reload is aborted and the user
+ * is left with "my change did not take":
+ *
+ *   content disagrees with the name   example.srs holding JSON  -> the file
+ *                                     is parsed as SRS and fails
+ *   the field says the wrong thing    format=binary on a .json    -> same
+ *   there is no name to infer from     a file with no extension   -> "missing
+ *                                     format", a different error for the
+ *                                     same underlying mistake
+ *
+ * So the correction is to look at the bytes.  The functions below are split
+ * in two on purpose: ruleSetFormatFromBytes() is a pure function of what it
+ * is handed, so the decision is unit-testable and auditable, and
+ * probeRuleSetFile() is the only part that touches the disk.  It is called
+ * from the CLI's resolve_env(), never from generator/ (guard 27), and its
+ * verdict reaches the generator as an ordinary context field.
+ *
+ * Nothing here ever *guesses*: an unreadable, empty or unclassifiable file
+ * yields no verdict at all, and the declared format is left exactly as the
+ * user wrote it.  sing-box stays the authority, and auto-correction can
+ * never become a second source of wrongness. */
+
+/* How many leading bytes ruleSetFormatFromBytes() needs.  Three for the magic,
+ * plus room to skip leading whitespace before the first JSON brace - a file
+ * written by a text editor or a Windows tool routinely starts with "\r\n".
+ * 512 is far more than the decision can use and far less than any real
+ * rule-set, so reading it is one short read, not a load. */
+export const RULESET_PROBE_BYTES = 512;
+
+/* ruleSetFormatFromBytes(head, size) -> 'binary' | 'source' | null.
+ *
+ * `head` is the leading bytes as a string (ucode fs.read hands them over as
+ * one), `size` the whole file's size.  Returns null when the bytes do not
+ * identify a format - an empty file, or content that is neither SRS nor JSON
+ * (a truncated download, an HTML error page served with a .srs name). */
+export function ruleSetFormatFromBytes(head, size) {
+	/* Empty is not "source" and not "binary": sing-box rejects a 0-byte
+	 * local rule-set with "invalid sing-box rule-set file" whatever format
+	 * is declared, so no verdict is the honest answer here and declaring one
+	 * would not help. */
+	if (!size || !head)
+		return null;
+
+	/* The SRS magic, compared byte by byte.
+	 *
+	 * isBinary() must NOT be reused here, and the reason is worth being exact
+	 * about, because the obvious one is wrong: isBinary() does not say "not
+	 * SRS", so it cannot be used as a negative test.  It answers a different
+	 * question - "does this look like text?" - and for rule-sets that answer
+	 * is only *correlated* with the format, never equal to it:
+	 *
+	 *   a full .srs happens to read as binary, because the version byte and
+	 *   the deflate stream carry control bytes.  That is a property of this
+	 *   week's encoder, not of the format, and it only holds because the
+	 *   probe happens to read enough of the file;
+	 *   a negative is ambiguous - binary-but-not-SRS, or text that is not
+	 *   JSON - and those need different answers.
+	 *
+	 * The magic is the format's own identity, costs three bytes, and gives
+	 * null for anything it does not recognise.  That last part is the point:
+	 * this probe declines to have an opinion rather than guessing. */
+	if (length(head) >= 3 &&
+	    ord(head, 0) == 0x53 && ord(head, 1) == 0x52 && ord(head, 2) == 0x53)
+		return 'binary';
+
+	/* Source is JSON, so the first byte that is not whitespace decides.
+	 * Both { (an object) and [ (an array) are accepted: sing-box's own
+	 * source form is an object, but an array is still "this is JSON" and
+	 * refusing to say so would only hand the decision back to a guess. */
+	const lead = trim(head);
+	if (length(lead) && (substr(lead, 0, 1) == '{' || substr(lead, 0, 1) == '['))
+		return 'source';
+
+	return null;
+};
+
+/* ruleSetFormatFromPath(path) -> 'binary' | 'source' | null.
+ *
+ * What sing-box's extension inference would decide for this name, expressed
+ * as the same two values.  null means "no extension sing-box can infer from",
+ * which is the case that produces "missing format" rather than a wrong parse -
+ * and the reason a content probe is worth doing at all.
+ *
+ * Deliberately NOT a general extension parser: only the two suffixes sing-box
+ * acts on are named, so this cannot drift into claiming it knows sing-box's
+ * rules.  A {tag} placeholder does not affect the answer, since the suffix
+ * comes after it. */
+export function ruleSetFormatFromPath(path) {
+	if (!path || type(path) !== 'string')
+		return null;
+
+	if (match(path, /\.json$/))
+		return 'source';
+
+	if (match(path, /\.srs$/))
+		return 'binary';
+
+	return null;
+};
+
+/* --- the "do not block startup on the first download" fallback ---------- *
+ *
+ * A remote rule-set with no `initial_path` is fetched during
+ * initialization, BEFORE the inbounds bind.  On a cold cache that means a
+ * fresh install cannot start until raw.githubusercontent.com answers - and if
+ * it does not, the whole instance dies with a FATAL and the health gate turns
+ * that into a rollback or a released intercept layer.  The node has to be up
+ * too, because these downloads go through http_clients, so a working
+ * configuration can be kept off the air by an unreachable CDN.
+ *
+ * `initial_path` is the way out: sing-box reads the file first, starts
+ * immediately, and refreshes from the URL in the background.  A download that
+ * keeps failing then becomes an ERROR line in the log instead of a failed
+ * start - and the health gate does not look at rule-sets at all, so a
+ * degraded rule-set is promoted like any other healthy start.
+ *
+ * What the file holds is an EMPTY rule-set, and that is the whole trade: a
+ * rule-set with no rules matches nothing, so its traffic falls through to
+ * `final`.  That changes routing, so this is opt-in (config.ruleset_safe_start,
+ * default off) and never the default.
+ *
+ * The format has to match the declared one.  A binary rule-set fed a source
+ * JSON is not read at all - sing-box ignores the mismatch and blocks exactly
+ * as it does with no initial_path - so the decision of whether a fallback is
+ * even possible is made once, here, from the same inputs on both sides. */
+
+/* Where the generated fallbacks live.  Inside the rule-set archive, so
+ * validateRuleSetPath() admits it and the jail's read-only mount of HP_DIR
+ * already exposes it to the sing-box user. */
+export const RULESET_INITIAL_DIR = HP_DIR + '/ruleset/initial';
+
+/* The two files the package ships for this.  empty.source.json is what
+ * `sing-box rule-set compile` consumes (24 bytes, readable, and the form
+ * every version agrees on); empty.srs is the compiled result of THAT source
+ * on 1.14.2, kept as the last resort for a router where the compile cannot
+ * run.
+ *
+ * The .srs is committed rather than built at package time on purpose: it is a
+ * 14-byte binary, and having it in the tree means `hexdump -C` on a router
+ * can confirm byte for byte that the shipped constant is the documented one.
+ * It is deliberately NOT a conffile - it is ours, not the user's, and an
+ * upgrade may replace it freely.
+ *
+ * Compatibility note, since a hard-coded binary artifact invites the question:
+ * sing-box only rejects an SRS whose version is NEWER than its own, so a
+ * version-2 file stays readable.  The compile path exists anyway, because a
+ * file produced by the kernel that is running it cannot drift from it. */
+export const RULESET_EMPTY_SOURCE = RULESET_INITIAL_DIR + '/empty.source.json';
+export const RULESET_EMPTY_BINARY = RULESET_INITIAL_DIR + '/empty.srs';
+
+/* A tag becomes a file name, so it has to be one.  UCI section names are
+ * already restricted, but a rule_set `tag` is a sing-box identifier that UCI
+ * does not fully own, and this value is about to be concatenated into a path
+ * the generator writes as root.  Anything outside this set is refused, and
+ * the caller skips the fallback rather than sanitising it into a name that
+ * could collide with another rule-set's. */
+export function isSafeRuleSetTag(tag) {
+	if (!tag || type(tag) !== 'string')
+		return false;
+
+	return match(tag, /^[A-Za-z0-9][A-Za-z0-9._-]*$/) != null;
+};
+
+/* The extension a format is stored under.  Null for anything that is not one
+ * of the two formats, which is the caller's signal that no fallback is
+ * possible rather than something to guess at. */
+export function ruleSetFormatExtension(format) {
+	if (format === 'binary')
+		return 'srs';
+
+	if (format === 'source')
+		return 'json';
+
+	return null;
+};
+
+/* ruleSetInitialFallback(tags, declared, url) -> the initial_path to emit, or
+ * null when no fallback is possible.
+ *
+ * One function, called from both sides on purpose.  The CLI asks it to
+ * decide which files to create and the generator asks it where to point
+ * `initial_path`; if they each worked it out separately they could disagree
+ * about the format, and a mismatch is the failure this whole mechanism exists
+ * to avoid - sing-box ignores a wrong-format initial file and blocks startup
+ * exactly as if there were none.
+ *
+ * `declared` is the rule-set's own `format`, which for a rule-set with no
+ * initial file is also the format the generator emits (nothing to probe, so
+ * nothing is corrected).  With no declared format the URL's extension is the
+ * only remaining evidence; with neither, the answer is null and the rule-set
+ * keeps today's behaviour rather than being handed a file of the wrong shape.
+ *
+ * More than one tag gets a `{tag}` placeholder, because that is what sing-box
+ * substitutes and it requires every tag's file to exist - P3 on 1.14.2: a
+ * literal "{tag}.srs" on disk makes it try to download and block. */
+export function ruleSetInitialFallback(tags, declared, url) {
+	const format = declared || ruleSetFormatFromPath(url);
+	const ext = ruleSetFormatExtension(format);
+
+	if (!ext)
+		return null;
+
+	for (let tag in (tags || []))
+		if (!isSafeRuleSetTag(tag))
+			return null;
+
+	const stem = (length(tags || []) > 1) ? '{tag}' : tags[0];
+
+	return RULESET_INITIAL_DIR + '/' + stem + '.' + ext;
+};
+
+/* probeRuleSetFile(path) -> 'binary' | 'source' | null.
+ *
+ * The disk half.  Returns null - meaning "no opinion" - for a path outside the
+ * rule-set policy, a missing/empty/non-regular file, an unreadable one, and
+ * for content it cannot classify.  The policy check is not redundant with
+ * ruleset.uc's: this runs BEFORE the generator, on paths that have not been
+ * vetted yet, and it is a reader.
+ *
+ * lstat() rather than the two-argument access() - see the note in
+ * generate_client.uc's china_ip6_ready about this ucode build answering only
+ * in its one-argument form. */
+export function probeRuleSetFile(path) {
+	if (!validateRuleSetPath(path))
+		return null;
+
+	const st = lstat(path);
+	if (!st || st.type !== 'file' || st.size <= 0)
+		return null;
+
+	const f = open(path);
+	if (!f)
+		return null;
+
+	/* The `?? ''` is the same defensive read read_capped() uses: a short or
+	 * failed read must not become a null the caller has to reason about. */
+	const head = f.read(RULESET_PROBE_BYTES) ?? '';
+	f.close();
+
+	return ruleSetFormatFromBytes(head, st.size);
+};
+
 /* Read at most `limit` bytes from a file, or '' when it does not exist.
  * The cap is deliberate: a command's output is not trustworthy input. */
 function read_capped(path, limit) {
