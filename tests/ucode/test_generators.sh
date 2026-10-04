@@ -73,6 +73,19 @@ run_case() {
 		fi
 	fi
 
+	# And the DNS half of the split, staged for the same reason and by the
+	# same route: hp_prepare_runtime_files runs domain_ruleset.uc over
+	# china_list.txt, and generate_client.uc reports the result as
+	# ctx.china_domain_ready (an lstat on this very file).  Without it the
+	# DNS rule that carries the domestic lookup is not emitted at all - by
+	# design, because a rule_set naming a tag nothing declared makes
+	# sing-box reject the whole config.
+	if ! ucode -S "$ROOT/root/etc/homeproxy/scripts/runtime/domain_ruleset.uc" \
+		"$ROOT/root/etc/homeproxy/resources/china_list.txt" "$dir/resources/china-domain.json" \
+		>>"$dir/resources/china-domain.log" 2>&1; then
+		printf '{"version":3,"rules":[{"domain_suffix":["example.invalid"]}]}\n' > "$dir/resources/china-domain.json"
+	fi
+
 	if grep -q "__RULESET_DIR__" "$fixture"; then
 		# The fixture needs a real local rule-set on disk.  The path has to
 		# satisfy validateRuleSetPath(), whose RULE_PATH_ROOTS was rewritten

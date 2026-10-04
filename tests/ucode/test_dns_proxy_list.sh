@@ -83,6 +83,17 @@ stage_case() {
 		printf '{"version":3,"rules":[{"ip_cidr":["192.0.2.0/24"]}]}\n' > "$dir/resources/china_ip4.json"
 	fi
 
+	# The DNS half of the China split.  generate_client.uc reports it as
+	# ctx.china_domain_ready, an lstat on this file; absent, the domestic
+	# lookup rule is not emitted and the ordering this file asserts cannot be
+	# observed at all.  On a router hp_prepare_runtime_files generates it from
+	# china_list.txt by the same route as china_ip4.json above.
+	if ! ucode -S "$ROOT/root/etc/homeproxy/scripts/runtime/domain_ruleset.uc" \
+		"$ROOT/root/etc/homeproxy/resources/china_list.txt" "$dir/resources/china-domain.json" \
+		>>"$dir/resources/china-domain.log" 2>&1; then
+		printf '{"version":3,"rules":[{"domain_suffix":["example.invalid"]}]}\n' > "$dir/resources/china-domain.json"
+	fi
+
 	VALIDATE_DATA="${HP_VALIDATE_DATA:-/sbin/validate_data}"
 	sed -e "s#^export const HP_DIR = '/etc/homeproxy';#export const HP_DIR = '$dir';#" \
 	    -e "s#^export const RUN_DIR = '/var/run/homeproxy';#export const RUN_DIR = '$dir/run';#" \
