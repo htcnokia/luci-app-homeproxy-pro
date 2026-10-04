@@ -127,15 +127,11 @@ run_case() {
 	fi
 
 
-	# Stage the two empty-rule-set files the "do not block startup" fallback
-	# uses.  RULESET_INITIAL_DIR is derived from HP_DIR, which was rewritten
-	# to $dir above, so the generator looks for them under $dir/ruleset/initial
-	# and the repository's copy has to be staged there.  Copied rather than
-	# referenced so a case that deletes or corrupts one cannot damage the
-	# checkout - the byte-exactness of the constant is arch-guard 52's job.
-	mkdir -p "$dir/ruleset/initial"
-	cp "$ROOT/root/etc/homeproxy/ruleset/initial/empty.srs" "$dir/ruleset/initial/"
-	cp "$ROOT/root/etc/homeproxy/ruleset/initial/empty.source.json" "$dir/ruleset/initial/"
+	# Stage the rule-set archive.  A user-defined `type: local` rule-set names
+	# a path under it, and `sing-box check` opens every one of them, so the
+	# directory has to exist before the generated configuration is validated -
+	# the same reason hp_prepare_ruleset_dir() creates it on a real start.
+	mkdir -p "$dir/ruleset"
 
 	# HP_VALIDATE_DATA lets a development host replace /sbin/validate_data
 	# (see tests/README.md); on a target the production path is kept.
@@ -1424,177 +1420,55 @@ for pair in "ruleset-update-interval:3600s:3600" "ruleset-update-interval-unit:2
 	fi
 done
 
-# 8) Batch 2a: the "do not block startup on the first download" fallback.
+# 8) Node server addresses: the generator exports them for the intercept layer.
 #
-#    A remote rule-set with no initial_path is fetched during initialization,
-#    BEFORE the inbounds bind.  On a cold cache - which is what a fresh install
-#    has, since cache.db ships empty - that means the first start waits on
-#    raw.githubusercontent.com, through the selected node, before the instance
-#    will listen at all; and a failure there is a FATAL that the health gate
-#    turns into a rollback or a released intercept layer.
+#    LAN traffic to the node's own address used to be redirected into sing-box,
+#    which then dialled that same address through the tunnel to that same node.
+#    sing-box's own outbound is exempt (routing_mark / self_mark); the LAN was
+#    not, and nothing in the rule-set kept it out.
 #
-#    The opt-in points such a rule-set at an EMPTY rule-set, so sing-box reads
-#    a file, starts, and refreshes from the URL in the background.  It is
-#    opt-in because an empty rule-set matches nothing and everything it would
-#    have split falls through to `final` - a routing change, not a robustness
-#    tweak.
-#
-#    The first case is the one that matters most and is the easiest to get
-#    wrong: with the switch off, nothing may change.  Not "the feature is off",
-#    but no initial_path, no file written, and a configuration that differs
-#    from the pre-feature one.
+#    The two files are the whole mechanism, and both are checked here because
+#    either one being wrong fails silently: a missing domains file means dnsmasq
+#    writes no nftset= snippet, and a missing ips file means the set renders with
+#    no elements.  Neither logs anything at the point of failure.
+run_case node-addr "$ROOT/tests/fixtures/generators/client.uci" generate_client.uc sing-box-c.json
 
-# 8a) The default.  opt-in off -> no initial_path anywhere, and no fallback
-#     file created.  The generated config must be identical to the same
-#     fixture with the option absent, which is the upgrade-invisible property.
-run_case safe-start-off "$ROOT/tests/fixtures/generators/client.uci" generate_client.uc sing-box-c.json
-run_case safe-start-off-explicit "$ROOT/tests/fixtures/generators/client.uci" generate_client.uc sing-box-c.json \
-	"s/option log_level 'error'/option log_level 'error'\n\toption ruleset_safe_start '0'/"
-
-for name in safe-start-off safe-start-off-explicit; do
-	f="$WORK/$name/run/sing-box-c.json"
-	if [ ! -f "$f" ]; then
-		echo "FAIL: $name: no config was generated"
-		FAILED=1
-	elif grep -q 'initial_path' "$f"; then
-		echo "FAIL: $name: the opt-in is OFF but the config carries an initial_path:"
-		grep -n 'initial_path' "$f" | sed 's/^/      /'
-		FAILED=1
-	elif [ -d "$WORK/$name/ruleset/initial" ] && [ -n "$(ls -A "$WORK/$name/ruleset/initial" 2>/dev/null | grep -v '^empty\.')" ]; then
-		echo "FAIL: $name: the opt-in is OFF but a fallback file was written:"
-		ls -1 "$WORK/$name/ruleset/initial" | sed 's/^/      /'
-		FAILED=1
-	else
-		echo "PASS: $name: opt-in off -> no initial_path, no fallback file"
-	fi
-done
-
-# 8b) opt-in on, the built-ins.  These two ARE the feature: an earlier version
-#     of this file only knew how to build their entries, and the CLI had no
-#     idea they existed, so a cold install blocked on downloading them.
-run_case safe-start-on "$ROOT/tests/fixtures/generators/client.uci" generate_client.uc sing-box-c.json \
-	"s/option log_level 'error'/option log_level 'error'\n\toption ruleset_safe_start '1'/"
-
-ss_json="$WORK/safe-start-on/run/sing-box-c.json"
-ss_initial="$WORK/safe-start-on/ruleset/initial"
-if [ ! -f "$ss_json" ]; then
-	echo "FAIL: safe-start-on: no config was generated"
+na_dir="$WORK/node-addr/run"
+if [ ! -f "$na_dir/sing-box-c.json" ]; then
+	echo "FAIL: node-addr: no config was generated"
 	FAILED=1
 else
-	# grep -F on the fully-constructed path, not an awk range around the entry.
-	# The range form over-captured: it ran past the entry's closing brace into
-	# the next one and then reported success on whatever it found, so a
-	# rule-set with NO initial_path would have passed whenever the next entry
-	# had one.  Asserting the exact string also pins that the path is inside
-	# this run's archive, which is the property that makes it readable by the
-	# jailed client and admitted by the path whitelist.
-	for tag in geoip-cn geosite-cn; do
-		want="\"initial_path\": \"$ss_initial/$tag.srs\""
-		if ! grep -qF "$want" "$ss_json"; then
-			echo "FAIL: safe-start-on: the built-in '$tag' does not carry"
-			echo "      $want"
-			grep -n 'initial_path' "$ss_json" | sed 's/^/      /'
-			FAILED=1
-		elif [ ! -s "$ss_initial/$tag.srs" ]; then
-			echo "FAIL: safe-start-on: '$tag' points at an initial file that was not written"
-			FAILED=1
-		else
-			echo "PASS: safe-start-on: built-in '$tag' -> initial_path inside the archive, file present"
-		fi
-	done
-
-	# The file has to be a real compiled rule-set, not a copy of the source
-	# JSON and not an empty file: sing-box IGNORES an initial file whose format
-	# does not match the declared one and blocks startup exactly as if there
-	# were none, which would make the whole feature a no-op that looks enabled.
-	# The magic is the check - it is what distinguishes a .srs from source JSON.
-	for tag in geoip-cn geosite-cn; do
-		f="$ss_initial/$tag.srs"
-		[ -s "$f" ] || continue
-		if [ "$(dd if="$f" bs=1 count=3 2>/dev/null)" = "SRS" ]; then
-			echo "PASS: safe-start-on: $tag.srs is a compiled rule-set (SRS magic)"
-		else
-			echo "FAIL: safe-start-on: $tag.srs is not a compiled rule-set - the first three"
-			echo "      bytes are not the SRS magic, so sing-box would ignore the initial file"
-			FAILED=1
-		fi
-	done
+	if [ -s "$na_dir/node-addr-domains.txt" ]; then
+		echo "PASS: node-addr: node-addr-domains.txt written ($(wc -l < "$na_dir/node-addr-domains.txt") host names)"
+	else
+		echo "FAIL: node-addr: no node-addr-domains.txt; dnsmasq would get no nftset= snippet and"
+		echo "      LAN connections to the node would be redirected into the proxy"
+		FAILED=1
+	fi
+	# A literal address cannot be back-filled by dnsmasq - there is no name for
+	# it to resolve - so firewall_post.ut renders it from this file instead.
+	if grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|^[0-9a-fA-F:]+:[0-9a-fA-F:]*$' "$na_dir/node-addr-ips.txt" 2>/dev/null; then
+		echo "PASS: node-addr: node-addr-ips.txt holds literal addresses"
+	elif [ -s "$na_dir/node-addr-domains.txt" ]; then
+		# The fixture's node is a host name, so an empty ips file is the
+		# correct answer here rather than a silent failure.
+		echo "PASS: node-addr: no literal-address node in this fixture, ips file correctly empty"
+	else
+		echo "FAIL: node-addr: node-addr-ips.txt is missing and the domains file is empty too -"
+		echo "      the generator did not export anything"
+		FAILED=1
+	fi
+	# An entry that is neither a host name nor an address is what the split is
+	# for; a bracketed IPv6 literal has to arrive unbracketed or the nft set
+	# element is a syntax error and fw4 rejects the whole ruleset.
+	if grep -q '\[' "$na_dir/node-addr-domains.txt" 2>/dev/null || grep -q '\[' "$na_dir/node-addr-ips.txt" 2>/dev/null; then
+		echo "FAIL: node-addr: an address kept its brackets; the nft set element would be invalid"
+		FAILED=1
+	else
+		echo "PASS: node-addr: no bracketed address leaked into either file"
+	fi
 fi
 
-# 8c/8d) opt-in on, user-defined remote rule-sets: one tag and two tags.
-#     One fixture covers both, plus a disabled one:
-#     tests/fixtures/generators/custom_safe_start.uci.  A separate file rather
-#     than sed variations of custom.uci, because the opt-in belongs to the
-#     `config homeproxy 'routing'` section - a different section than anything
-#     the existing variations anchor on - and because a two-expression sed that
-#     both inserts an option and appends a whole section is a construct this
-#     suite has never run.  The one-expression form is proven here; the
-#     two-expression form is not, and a test whose own tooling is untested is
-#     how a case quietly stops testing anything.
-run_case safe-start-user-remote "$ROOT/tests/fixtures/generators/custom_safe_start.uci" \
-	generate_client.uc sing-box-c.json
-
-sr_json="$WORK/safe-start-user-remote/run/sing-box-c.json"
-sr_initial="$WORK/safe-start-user-remote/ruleset/initial"
-if [ ! -f "$sr_json" ]; then
-	echo "FAIL: safe-start-user-remote: no config was generated"
-	FAILED=1
-else
-	# Single tag: a concrete path, and the file it names has to be there.  A
-	# pointer at a file that does not exist is not a degraded feature, it is no
-	# feature - sing-box ignores it and blocks startup exactly as before.
-	# Same reason as 8b: assert the exact string, not a range that can run on
-	# into the next entry.
-	sr_want="\"initial_path\": \"$sr_initial/cfg-rs_remote-rule.srs\""
-	if ! grep -qF "$sr_want" "$sr_json"; then
-		echo "FAIL: safe-start-user-remote: the single-tag rule-set does not carry"
-		echo "      $sr_want"
-		grep -n 'initial_path' "$sr_json" | sed 's/^/      /'
-		FAILED=1
-	fi
-	if [ -s "$sr_initial/cfg-rs_remote-rule.srs" ]; then
-		echo "PASS: safe-start-user-remote: single-tag -> concrete initial_path, file present"
-	else
-		echo "FAIL: safe-start-user-remote: no fallback file for cfg-rs_remote-rule.srs"
-		FAILED=1
-	fi
-
-	# Multi tag: {tag} in the path, and one file per tag.  The entry is matched
-	# on the multi-tag shape (a tag ARRAY) rather than on the section name, so
-	# the assertion cannot be satisfied by the single-tag entry above.
-	mt_want="\"initial_path\": \"$sr_initial/{tag}.srs\""
-	if ! grep -qF "$mt_want" "$sr_json"; then
-		echo "FAIL: safe-start-user-remote: the multi-tag rule-set does not carry"
-		echo "      $mt_want"
-		echo "      sing-box substitutes {tag} and opens every resulting file, so a"
-		echo "      literal path would make it fetch and block - the failure this removes"
-		grep -n 'initial_path' "$sr_json" | sed 's/^/      /'
-		FAILED=1
-	fi
-	mt_missing=""
-	for tag in cfg-rs_multi-rule cfg-alt-rule; do
-		[ -s "$sr_initial/$tag.srs" ] || mt_missing="$mt_missing $tag"
-	done
-	if [ -n "$mt_missing" ]; then
-		echo "FAIL: safe-start-user-remote: no fallback file for:$mt_missing"
-		echo "      sing-box opens every tag's file, so a missing one blocks startup"
-		FAILED=1
-	else
-		echo "PASS: safe-start-user-remote: multi-tag -> {tag} placeholder, one file per tag"
-	fi
-
-	# Disabled: build_user_rulesets() skips it, so it must be absent from the
-	# config AND must not have caused a file to be written for it.
-	if grep -q 'cfg-rs_off-rule' "$sr_json"; then
-		echo "FAIL: safe-start-user-remote: a disabled rule-set reached the generated config"
-		FAILED=1
-	elif [ -e "$sr_initial/cfg-rs_off-rule.srs" ]; then
-		echo "FAIL: safe-start-user-remote: a fallback file was written for a disabled rule-set"
-		FAILED=1
-	else
-		echo "PASS: safe-start-user-remote: a disabled rule-set gets neither path nor file"
-	fi
-fi
 # 6) P3 #8 (extra_tags die() on missing {tag}): deferred to
 #    a dedicated 'testbed-dialect' sprint. The multi-line sed to
 #    attach an extra_tags list onto the existing rs_local ruleset
