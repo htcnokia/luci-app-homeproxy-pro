@@ -90,6 +90,18 @@ function node_addr_to_nftarr(family) {
 	return isEmpty(out) ? null : array_to_nftarr(out);
 }
 
+/* Whether the node bypass has anything to protect at all.
+
+   Either export file counts.  The domains file is the one that matters most:
+   a host-name node - the common case, and the one the device this was written
+   for uses - appears only there, and its set has to exist before dnsmasq can
+   put anything in it.  Gating on the literal-address file instead is what left
+   the whole mechanism doing nothing. */
+function node_addr_protected() {
+	return !isEmpty(readfile(run_dir + '/node-addr-ips.txt'))
+		|| !isEmpty(readfile(run_dir + '/node-addr-domains.txt'));
+}
+
 /* Normalize a list of IPv6 entries into an nftables anonymous set
    (or null when empty), so IPv6 ACLs match in a single set lookup
    instead of one rule per address. */
@@ -431,28 +443,43 @@ set homeproxy_routing_port {
 }
 {% endif %}
 
-{# Node server addresses.  Declared only when there is something to put in
-   them, so a configuration with no literal-address node emits no set and no
-   rule rather than an empty one that matches nothing. #}
+{# Node server addresses.
+   Declared when the generator exported any node address at all - and NOT
+   only when there is a literal address to put in it.
+
+   That distinction is the whole point of the set existing.  A node configured
+   with a host name contributes no element here; dnsmasq resolves the name and
+   back-fills this set through the nftset= snippet runtime/dns.sh writes.  A
+   set that is declared only when it already has elements is therefore never
+   declared for a host-name node, the back-fill has nothing to land in, and the
+   return rules below - which are what actually exclude the address - are not
+   emitted either.  r41 gated both on the literal form and was inert for the
+   configuration it was written for.
+
+   An empty set is harmless: nft accepts one with no elements, and the cost is
+   one lookup per packet until the first answer back-fills it. #}
+{% set node_protect = node_addr_protected(); %}
 {% set node_addr_v4 = node_addr_to_nftarr(4); %}
-{% if (node_addr_v4): %}
+{% if (node_protect): %}
 set homeproxy_node_addr_v4 {
 	type ipv4_addr
 	flags interval
 	auto-merge
+{% if (node_addr_v4): %}
 	elements = { {{ node_addr_v4 }} }
+{% endif %}
 }
 {% endif %}
-{% if (v6_handled): %}
+{% if (node_protect && v6_handled): %}
 {% set node_addr_v6 = node_addr_to_nftarr(6); %}
-{% if (node_addr_v6): %}
 set homeproxy_node_addr_v6 {
 	type ipv6_addr
 	flags interval
 	auto-merge
+{% if (node_addr_v6): %}
 	elements = { {{ node_addr_v6 }} }
-}
 {% endif %}
+}
 {% endif /* node_addr_v6 */ %}
 
 {# DNS hijack & TCP redirect #}
@@ -517,10 +544,10 @@ chain homeproxy_redirect_lanac {
 chain homeproxy_redirect {
 	meta mark {{ self_mark }} counter return
 
-	{% if (node_addr_v4): %}
+	{% if (node_protect): %}
 	ip daddr @homeproxy_node_addr_v4 counter return comment "!{{ cfgname }}: node address"
 	{% endif %}
-	{% if (v6_handled && node_addr_v6): %}
+	{% if (node_protect && v6_handled): %}
 	ip6 daddr @homeproxy_node_addr_v6 counter return comment "!{{ cfgname }}: node address"
 	{% endif %}
 
@@ -645,10 +672,10 @@ chain homeproxy_mangle_lanac {
 }
 
 chain homeproxy_mangle_prerouting {
-	{% if (node_addr_v4): %}
+	{% if (node_protect): %}
 	ip daddr @homeproxy_node_addr_v4 counter return comment "!{{ cfgname }}: node address"
 	{% endif %}
-	{% if (v6_handled && node_addr_v6): %}
+	{% if (node_protect && v6_handled): %}
 	ip6 daddr @homeproxy_node_addr_v6 counter return comment "!{{ cfgname }}: node address"
 	{% endif %}
 
@@ -716,10 +743,10 @@ chain homeproxy_mangle_prerouting {
 chain homeproxy_mangle_output {
 	meta mark {{ self_mark }} counter return
 
-	{% if (node_addr_v4): %}
+	{% if (node_protect): %}
 	ip daddr @homeproxy_node_addr_v4 counter return comment "!{{ cfgname }}: node address"
 	{% endif %}
-	{% if (v6_handled && node_addr_v6): %}
+	{% if (node_protect && v6_handled): %}
 	ip6 daddr @homeproxy_node_addr_v6 counter return comment "!{{ cfgname }}: node address"
 	{% endif %}
 
