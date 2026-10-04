@@ -318,6 +318,17 @@ function resolve_env(dm) {
 		}
 	}
 
+	if (routing_mode !== 'custom') {
+		const direct_list_raw = readfile(HP_DIR + '/resources/direct_list.txt');
+		env.direct_domain_list = direct_list_raw ? split(trim(direct_list_raw), /[\r\n]/) : [];
+
+		const proxy_list_raw = readfile(HP_DIR + '/resources/proxy_list.txt');
+		env.proxy_domain_list = proxy_list_raw ? split(trim(proxy_list_raw), /[\r\n]/) : [];
+	}
+
+	return env;
+}
+
 const dm = Loader.load(UCICONFIG_DIR);
 const config = removeBlankAttrs(generate(dm, resolve_env(dm)));
 
