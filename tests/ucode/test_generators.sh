@@ -464,6 +464,75 @@ EOF
 	esac
 fi
 
+# The same fixture with a NON-default self_mark.  250 is deliberately clear
+# of every other mark in the fixtures (self_mark 100, tproxy_mark 101,
+# tun_mark 102), so a value that leaked in from the wrong place would show up
+# as a mismatch rather than as a coincidence.
+#
+# Why this case exists at all: the mark is a two-sided contract read from one
+# UCI option - firewall_post.ut renders `meta mark <self_mark> counter
+# return`, generator/context.uc turns the same value into every outbound's
+# routing_mark.  Both sides read infra.self_mark, but they normalise it
+# differently: the nft side goes through mark_value_or(), which falls back to
+# 100 for anything fw4.parse_mark does not reduce to a bare hex value, while
+# the generator hands the raw string to strToInt().  Until now every fixture
+# declared 100, so the two paths never had to agree on anything else and the
+# divergence was untested.
+#
+# A dedicated fixture file would differ from redirect.uci by that one option,
+# which is what run_case's variation argument is for (see the main_udp_node
+# case below for the other user of it).  The expected value is read back from
+# the STAGED fixture rather than hardcoded: fixture_self_mark() takes a path,
+# and the staged copy is what the generator actually saw, so the assertion
+# cannot drift away from its input the way a literal 250 would.
+run_case redirect-self-mark "$ROOT/tests/fixtures/generators/redirect.uci" generate_client.uc sing-box-c.json \
+	"s/^\([[:space:]]*\)option self_mark '100'/\1option self_mark '250'/"
+
+rsm_dir="$WORK/redirect-self-mark"
+rsm_json="$rsm_dir/run/sing-box-c.json"
+rsm_mark="$(fixture_self_mark "$rsm_dir/config/homeproxy")"
+
+if [ "$rsm_mark" != "250" ]; then
+	# Two ways to land here, both a vacuous assertion rather than a product
+	# failure: the variation did not apply, or fixture_self_mark cannot read
+	# what is there.  run_case's own cmp guard catches a variation that
+	# matched nothing, so reaching this means the mark is unreadable.
+	echo "FAIL: redirect-self-mark: the staged fixture declares self_mark='$rsm_mark',"
+	echo "      not the 250 this case varies to, so the assertion is vacuous"
+	FAILED=1
+elif [ ! -f "$rsm_json" ]; then
+	echo "FAIL: redirect-self-mark: no config was generated"
+	FAILED=1
+else
+	mark_result="$(ucode "$WORK/markcheck.uc" "$rsm_mark" "$rsm_json" 2>"/dev/null")"
+	mark_checked="${mark_result%% *}"
+	mark_problems="${mark_result##* }"
+
+	case "$mark_checked" in
+	''|*[!0-9]*)
+		echo "FAIL: redirect-self-mark: could not check the emitted outbounds ($rsm_json)"
+		FAILED=1
+		;;
+	0)
+		echo "FAIL: redirect-self-mark: no dialling outbound was emitted, the assertion is vacuous"
+		FAILED=1
+		;;
+	*)
+		if [ "$mark_problems" -ne 0 ]; then
+			echo "FAIL: redirect-self-mark: $mark_problems of $mark_checked dialling outbounds do not"
+			echo "      carry routing_mark=$rsm_mark.  With infra.self_mark at a non-default"
+			echo "      value the nft side and the generator must still agree: a generator"
+			echo "      that fell back to 100 (or dropped the field) while firewall_post.ut"
+			echo "      emitted 'meta mark 250 counter return' leaves the loop-prevention"
+			echo "      return matching nothing."
+			FAILED=1
+		else
+			echo "PASS: redirect-self-mark: all $mark_checked dialling outbounds carry routing_mark=$rsm_mark"
+		fi
+		;;
+	esac
+fi
+
 # The UDP tproxy path: a dedicated UDP node makes context.uc assign
 # tproxy_port, firewall_post.ut emit the tproxy chain, and inbound.uc emit the
 # tproxy-in that chain redirects to.  No fixture covered this path before -

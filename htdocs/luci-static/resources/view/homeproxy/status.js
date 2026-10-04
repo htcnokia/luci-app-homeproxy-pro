@@ -386,6 +386,50 @@ return view.extend({
 			return ruleSetNode;
 		};
 
+		/* A dedicated section rather than a fourth log view: the question this
+		 * answers is "collect everything someone would ask me to look at, in
+		 * one file", and the answer is a download rather than something to read
+		 * on the page.  The report is assembled by the backend because the
+		 * commands that fill it (nft, ip rule, the package queries) are not
+		 * browser-reachable; the ACL grants read on the output path only.
+		 *
+		 * The title is "Diagnostic report" and not the more natural
+		 * "Diagnostics" on purpose: a shipped zh-cn catalog somewhere in the
+		 * LuCI stack already renders a bare "Diagnostics" as 网络诊断, which
+		 * reads as a network diagnostic tool rather than a generated file.
+		 * A msgid this specific cannot collide with another package's. */
+		s = m.section(form.NamedSection, 'config', 'homeproxy', _('Diagnostic report'));
+		s.anonymous = true;
+
+		o = s.option(form.DummyValue, '_debug_report');
+		o.rawhtml = true;
+		o.render = function() {
+			return E('div', { 'class': 'cbi-value' }, [
+				E('p', {}, _('Collects system, dependency, routing, firewall and configuration state into one file. Credentials are masked by option name; public addresses and LAN topology are not. Read it before posting it anywhere.')),
+				E('button', {
+					'class': 'cbi-button cbi-button-action',
+					'click': ui.createHandlerFn(this, () => {
+						return hp.rpcCall('debug_report', [], { expect: { '': {} } })
+							.then((res) => {
+								if (!res.result)
+									throw new Error(res.error || _('Could not build the report.'));
+								return fs.read_direct(res.path, 'blob');
+							})
+							.then((blob) => {
+								const url = window.URL.createObjectURL(blob, { type: 'text/markdown' });
+								const link = document.createElement('a');
+								link.href = url;
+								link.download = 'homeproxy-debug.log';
+								document.body.appendChild(link);
+								link.click();
+								document.body.removeChild(link);
+								window.URL.revokeObjectURL(url);
+							});
+						})
+				}, [ _('Generate and download') ])
+			]);
+		};
+
 		s = m.section(form.NamedSection, 'config', 'homeproxy');
 		s.anonymous = true;
 
