@@ -86,6 +86,21 @@ function is_hostname(entry) {
 			return false;
 	}
 
+	/* An all-numeric set of labels is a bare IPv4 address, not a domain:
+	 * the structure above accepts "192.168.1.1" quite happily, and a
+	 * domain_suffix rule holding an address never matches a query.  No TLD
+	 * is all digits, so this cannot cost a real name.  IPv6 never reaches
+	 * here at all - it carries colons and was rejected above. */
+	let all_numeric = true;
+	for (let label in split(entry, '.')) {
+		if (!match(label, /^[0-9]+$/)) {
+			all_numeric = false;
+			break;
+		}
+	}
+	if (all_numeric)
+		return false;
+
 	return true;
 }
 

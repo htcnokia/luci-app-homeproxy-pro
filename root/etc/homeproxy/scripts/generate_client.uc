@@ -30,7 +30,7 @@ import { lstat, mkdtemp, readfile, writefile } from 'fs';
 import { Loader } from './config/loader.uc';
 import { generate } from './generator/client.uc';
 import { rule_set_tags } from './generator/common.uc';
-import { removeBlankAttrs, isEmpty, isValidCIDR, probeRuleSetFile, ruleSetFormatFromPath, shellQuote, validateRuleSetPath, HP_DIR, RUN_DIR, UCICONFIG_DIR } from './homeproxy.uc';
+import { removeBlankAttrs, isEmpty, isValidCIDR, probeRuleSetFile, ruleSetFormatFromPath, shellQuote, validateRuleSetPath, validation, HP_DIR, RUN_DIR, UCICONFIG_DIR } from './homeproxy.uc';
 
 /* Resolve the GenerationContext inputs. This is the only impure step on the
  * client generation path, and it is deliberately here rather than under

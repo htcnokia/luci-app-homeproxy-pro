@@ -65,6 +65,14 @@ generate() {
 # A list shaped like the real one: comments, blank lines, plain two-label
 # names, the single-label and deep forms that appear in a real suffix list, and
 # the ways a line can be malformed.
+#
+# Every malformed entry below is named so that its own assertion's grep pattern
+# MATCHES it.  That is the point: an assertion whose pattern cannot match the
+# entry it is about stays green whether or not the entry is rejected, which is
+# a guard pointing at the wrong side.  The first draft of this fixture had
+# "trailing-hyphen.com" and "trailing.dot.com" - both perfectly valid names -
+# while the assertions claimed a trailing hyphen and a trailing dot, and both
+# assertions were vacuous.
 cat > "$WORK/mixed.txt" <<'EOF'
 # comment
 ; also a comment
@@ -76,17 +84,17 @@ a.b.c.example.cn
 xn--fiqs8s.com
 under_score.com
 -leading-hyphen.com
-trailing-hyphen.com
+trailinghyphen-.com
 double..dot.com
 .dotted.com
-trailing.dot.com
+trailingdot.com.
 with space.com
 http://scheme.com
 192.168.1.1
 EOF
 
-# Four survive: taobao.com, 163.com, 0.zone, a.b.c.example.cn,
-# xn--fiqs8s.com.  That is five, not four - see below.
+# Five survive: taobao.com, 163.com, 0.zone, a.b.c.example.cn,
+# xn--fiqs8s.com.  Everything else in the fixture is one malformation.
 expect "mixed list: only the valid entries survive" \
 	"$(generate "$WORK/mixed.txt" "$WORK/mixed.json")" "5 domain suffixes"
 expect "mixed list: the underscore name is gone" \
@@ -94,13 +102,13 @@ expect "mixed list: the underscore name is gone" \
 expect "mixed list: the leading-hyphen label is gone" \
 	"$(grep -c 'leading-hyphen' "$WORK/mixed.json")" "0"
 expect "mixed list: the trailing-hyphen label is gone" \
-	"$(grep -c 'trailing-hyphen' "$WORK/mixed.json")" "0"
+	"$(grep -c 'trailinghyphen-' "$WORK/mixed.json")" "0"
 expect "mixed list: the doubled dot is gone" \
-	"$(grep -c 'double..dot' "$WORK/mixed.json")" "0"
+	"$(grep -c 'double\.\.dot' "$WORK/mixed.json")" "0"
 expect "mixed list: the leading dot is gone" \
 	"$(grep -c '"\.dotted\.com"' "$WORK/mixed.json")" "0"
 expect "mixed list: the trailing dot is gone" \
-	"$(grep -c 'trailing\.dot\.com"' "$WORK/mixed.json")" "0"
+	"$(grep -c '"trailingdot\.com\."' "$WORK/mixed.json")" "0"
 expect "mixed list: the name with a space is gone" \
 	"$(grep -c 'with space' "$WORK/mixed.json")" "0"
 expect "mixed list: the URL is gone" \
