@@ -2223,9 +2223,9 @@ fi
 # proxy resolver even though the route side would now send it direct.
 cn_fb_block="$(sed -n '/cn_fallback/,/^		}/p' "$SCRIPTS/generator/dns.uc" || true)"
 if printf '%s' "$cn_fb_block" | grep -q "china-ip6"; then
-	pass "the cn-fallback response match covers china-ip6 as well as geoip-cn"
+	pass "the cn-fallback response match covers china-ip6 as well as china-ip"
 else
-	fail "cn-fallback still matches geoip-cn only; the DNS half of the IPv6 split"
+	fail "cn-fallback still matches china-ip only; the DNS half of the IPv6 split"
 	fail "is not in agreement with the route half"
 fi
 

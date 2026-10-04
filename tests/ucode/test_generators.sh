@@ -787,7 +787,7 @@ const config = json(readfile(ARGV[0]));
 const rules = config.dns?.rules || [];
 let has_eval_tag = false, has_match_response = false, geoip_ref = false;
 /* rule_set is emitted as an array because the cn-fallback match names more
- * than one rule-set when IPv6 support is on (geoip-cn + china-ip6). sing-box
+ * than one rule-set when IPv6 support is on (china-ip + china-ip6). sing-box
  * accepts a bare string for the single-tag case, so accept both shapes here
  * rather than pinning the one this build happens to produce. */
 const names = (v) => (type(v) === 'array' ? v : [v]);
@@ -796,7 +796,7 @@ for (let r in rules) {
 		has_eval_tag = true;
 	if (r.match_response === 'cn-fallback') {
 		has_match_response = true;
-		if (index(names(r.rule_set), 'geoip-cn') >= 0)
+		if (index(names(r.rule_set), 'china-ip') >= 0)
 			geoip_ref = true;
 	}
 }
@@ -804,7 +804,7 @@ printf('%d %d %d\n', +has_eval_tag, +has_match_response, +geoip_ref);
 EOF
 	cn_info="$(ucode "$WORK/cn-fallback.uc" "$client_json" 2>/dev/null)"
 	if [ "$cn_info" = "1 1 1" ]; then
-		echo "PASS: cn-fallback-default-on: evaluate+match_response with geoip-cn is in the proxy config"
+		echo "PASS: cn-fallback-default-on: evaluate+match_response with china-ip is in the proxy config"
 	else
 		echo "FAIL: cn-fallback-default-on: evaluate/match_response flags = '$cn_info', expected '1 1 1'"
 		FAILED=1
@@ -1022,36 +1022,36 @@ run_case_type_error dangling-resolver "does not exist or is disabled" \
 # it runs identically on macOS and the testbed. ucode-stdout probes
 # are out; structural assertions against the emitted bytes are in.
 
-# 1) P2 #2: geosite-cn is the *DNS*-layer rule_set consumer.
+# 1) china-domain is the *DNS*-layer rule_set consumer.
 #    The route layer never references it as a rule_set value (route.rule_set
 #    declares it as a tag). Indent cannot disambiguate dns.rules[] from
 #    route.rules[] (both pretty-print at 4 tabs on the testbed; both are
 #    bare-string `"rule_set": "..."`), so use count-based invariants:
-#      - "tag": "geosite-cn" appears at least once (route.rule_set)
-#      - "rule_set": "geosite-cn" appears EXACTLY once (dns.rules only;
+#      - "tag": "china-domain" appears at least once (route.rule_set)
+#      - "rule_set": "china-domain" appears EXACTLY once (dns.rules only;
 #        route.rules must NOT add a second one).
-#    A route regression that adds `"rule_set": "geosite-cn"` to route.rules
+#    A route regression that adds `"rule_set": "china-domain"` to route.rules
 #    bumps the count to 2 and fails loud.
-run_case route-no-geosite-cn "$ROOT/tests/fixtures/generators/client.uci" generate_client.uc sing-box-c.json
+run_case route-no-china-domain "$ROOT/tests/fixtures/generators/client.uci" generate_client.uc sing-box-c.json
 
-rs_json="$WORK/route-no-geosite-cn/run/sing-box-c.json"
+rs_json="$WORK/route-no-china-domain/run/sing-box-c.json"
 if [ ! -f "$rs_json" ]; then
-	echo "FAIL: route-no-geosite-cn: no config was generated"
+	echo "FAIL: route-no-china-domain: no config was generated"
 	FAILED=1
 else
-	rs_tag_count="$(grep -c '"tag": "geosite-cn"' "$rs_json")"
-	rs_ruleset_count="$(grep -c '"rule_set": "geosite-cn"' "$rs_json")"
+	rs_tag_count="$(grep -c '"tag": "china-domain"' "$rs_json")"
+	rs_ruleset_count="$(grep -c '"rule_set": "china-domain"' "$rs_json")"
 	if [ "$rs_tag_count" -lt 1 ]; then
-		echo "FAIL: route-no-geosite-cn: route.rule_set does not declare geosite-cn (tag count=$rs_tag_count, want >=1)"
+		echo "FAIL: route-no-china-domain: route.rule_set does not declare china-domain (tag count=$rs_tag_count, want >=1)"
 		FAILED=1
 	fi
 	if [ "$rs_ruleset_count" -ne 1 ]; then
-		echo "FAIL: route-no-geosite-cn: expected exactly 1 '\"rule_set\": \"geosite-cn\"' line (dns.rules only); got $rs_ruleset_count"
-		grep -n '"rule_set": "geosite-cn"' "$rs_json" | sed 's/^/      /'
+		echo "FAIL: route-no-china-domain: expected exactly 1 '\"rule_set\": \"china-domain\"' line (dns.rules only); got $rs_ruleset_count"
+		grep -n '"rule_set": "china-domain"' "$rs_json" | sed 's/^/      /'
 		FAILED=1
 	fi
 	if [ "$rs_tag_count" -ge 1 ] && [ "$rs_ruleset_count" -eq 1 ]; then
-		echo "PASS: route-no-geosite-cn: route.rule_set has geosite-cn (tag=$rs_tag_count); route.rules never references it (rule_set=$rs_ruleset_count, dns only)"
+		echo "PASS: route-no-china-domain: route.rule_set has china-domain (tag=$rs_tag_count); route.rules never references it (rule_set=$rs_ruleset_count, dns only)"
 	fi
 fi
 
