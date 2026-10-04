@@ -115,7 +115,13 @@ function export_node_addresses(config) {
 	const dump = (path, list) => {
 		if (isEmpty(list))
 			return;
-		if (writefile(path, join(uniq(list), '\n') + '\n') == null)
+		/* ucode's join() takes the separator FIRST: join(sep, list).  With
+		 * the arguments the other way round it does not raise, it returns
+		 * null - and null + '\n' is the four-character string "null\n", so
+		 * the file comes out non-empty and every "is it there?" check on
+		 * it passes.  That is exactly how a released r41 ended up with
+		 * dnsmasq resolving a host literally named "null". */
+		if (writefile(path, join('\n', uniq(list)) + '\n') == null)
 			warn(sprintf('homeproxy: could not write %s\n', path));
 	};
 

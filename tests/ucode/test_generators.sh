@@ -1451,11 +1451,30 @@ if [ ! -f "$na_dir/sing-box-c.json" ]; then
 	echo "FAIL: node-addr: no config was generated"
 	FAILED=1
 else
-	if [ -s "$na_dir/node-addr-domains.txt" ]; then
-		echo "PASS: node-addr: node-addr-domains.txt written ($(wc -l < "$na_dir/node-addr-domains.txt") host names)"
+	# The fixture's nodes are all host names (a.example.com ...), so the
+	# domains file must name them.  "The file exists" is NOT the assertion:
+	# join() with its arguments the wrong way round returns null, null + "\n"
+	# is the string "null\n", and the file is then non-empty while naming
+	# nothing.  A released r41 shipped exactly that and dnsmasq went on to
+	# resolve a host called "null".  So this greps for a name that is
+	# actually in the fixture.
+	if grep -qx 'a\.example\.com' "$na_dir/node-addr-domains.txt" 2>/dev/null; then
+		echo "PASS: node-addr: node-addr-domains.txt names the node ($(wc -l < "$na_dir/node-addr-domains.txt") host names)"
+	elif [ -s "$na_dir/node-addr-domains.txt" ]; then
+		echo "FAIL: node-addr: node-addr-domains.txt is non-empty but does not name a.example.com:"
+		sed 's/^/      /' "$na_dir/node-addr-domains.txt" | head -5
+		FAILED=1
 	else
 		echo "FAIL: node-addr: no node-addr-domains.txt; dnsmasq would get no nftset= snippet and"
 		echo "      LAN connections to the node would be redirected into the proxy"
+		FAILED=1
+	fi
+	# The literal "null" is the specific failure above, and it is worth
+	# naming: it is the one value that satisfies a bare existence check.
+	if grep -qx 'null' "$na_dir/node-addr-domains.txt" 2>/dev/null \
+	   || grep -qx 'null' "$na_dir/node-addr-ips.txt" 2>/dev/null; then
+		echo "FAIL: node-addr: an exported file contains the literal 'null' - join() has its"
+		echo "      arguments reversed (ucode takes the separator first)"
 		FAILED=1
 	fi
 	# A literal address cannot be back-filled by dnsmasq - there is no name for

@@ -2885,6 +2885,92 @@ else
 	printf '      %s\n' "$FETCH_LAYER"
 fi
 
+# guard 55: every join() call passes the separator first.
+#
+# ucode's join(sep, list) does not validate its arguments.  Swapped, it
+# returns null rather than raising, and null + '\n' is the string "null\n" -
+# a non-empty file naming nothing.  That shipped in r41: the node-address
+# export wrote "null", dnsmasq rendered nftset=/.null/... and the node
+# bypass silently did nothing while every existence check stayed green.
+#
+# This is cheap to pin because every call is a literal, so an argument that
+# is a list literal or a call returning one is the tell.
+join_bad="$(python3 - "$SCRIPTS" "$RPC" <<'PY_JOIN'
+import re, sys, pathlib
+
+def strip_comments(src):
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
+    return re.sub(r"//[^\n]*", " ", src)
+
+def top_level_first(args):
+    """First argument, split on commas that are not inside quotes or parens -
+    the separator itself is routinely ', '."""
+    depth, j = 0, 0
+    while j < len(args):
+        c = args[j]
+        if c in "'\"":
+            k = j + 1
+            while k < len(args) and args[k] != c:
+                k += 1
+            j = k + 1; continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            return args[:j].strip()
+        j += 1
+    return args.strip()
+
+def join_args(src, i):
+    depth, j, out = 0, i, []
+    while j < len(src):
+        c = src[j]
+        if c in "'\"":
+            k = j + 1
+            while k < len(src) and src[k] != c:
+                k += 1
+            out.append(src[j:k + 1]); j = k + 1; continue
+        if c == "(":
+            depth += 1
+            if depth == 1:
+                j += 1; continue
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return "".join(out), j
+        out.append(c); j += 1
+    return None, j
+
+bad = []
+for root in sys.argv[1:]:
+    p = pathlib.Path(root)
+    files = ([p] if p.is_file()
+             else sorted(p.rglob("*.uc")) + sorted(p.rglob("*.ut")))
+    for f in files:
+        src = strip_comments(f.read_text(errors="replace"))
+        for m in re.finditer(r"\bjoin\s*\(", src):
+            args, _ = join_args(src, m.end() - 1)
+            if args is None:
+                continue
+            first = top_level_first(args)
+            # A separator is a string literal.  Anything else in that slot -
+            # a call, a subscript, a bare identifier - is the swapped form,
+            # and ucode answers it with null instead of raising.
+            if not re.fullmatch(r"'[^']*'|\"[^\"]*\"", first):
+                bad.append("%s: join(%s, ...)" % (f.name, first))
+print("\n".join(sorted(set(bad))))
+PY_JOIN
+)"
+if [ -n "$join_bad" ]; then
+	fail "a join() call does not pass a string literal first (ucode takes join(sep, list), and"
+	fail "swapped it returns null silently instead of raising):"
+	printf '      %s\n' "$join_bad"
+else
+	pass "every join() call passes a string-literal separator first; swapped arguments would"
+	pass "  have returned null silently and shipped an empty-of-meaning export"
+fi
+
 echo
 printf '%s checks, %s failures\n' "$checks" "$([ "$FAILED" = 0 ] && echo 0 || echo 'nonzero')"
 if [ "$FAILED" != 0 ]; then
