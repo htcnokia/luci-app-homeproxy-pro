@@ -74,7 +74,7 @@ function resolve_ipv6(str) {
  * urltest membership, custom-mode routing_nodes, wireguard endpoints), and a
  * copy of that selection in this template is a copy that can drift.  A missing
  * file renders null, which is the behaviour before this existed. */
-function node_addr_to_nftarr(family) {
+function node_addr_to_nftarr(run_dir, family) {
 	let raw = readfile(run_dir + '/node-addr-ips.txt');
 	if (isEmpty(raw))
 		return null;
@@ -97,7 +97,7 @@ function node_addr_to_nftarr(family) {
    for uses - appears only there, and its set has to exist before dnsmasq can
    put anything in it.  Gating on the literal-address file instead is what left
    the whole mechanism doing nothing. */
-function node_addr_protected() {
+function node_addr_protected(run_dir) {
 	return !isEmpty(readfile(run_dir + '/node-addr-ips.txt'))
 		|| !isEmpty(readfile(run_dir + '/node-addr-domains.txt'));
 }
@@ -184,6 +184,25 @@ function dnsmasq_nftset() {
 /* Misc config */
 const resources_dir = '/etc/homeproxy/resources';
 const run_dir = '/var/run/homeproxy';
+
+/* Resolved here, in the ucode block, rather than with `{% set %}` in the
+ * template body below: utpl's `set` tag takes a plain expression and rejects a
+ * call outright - `{% set x = f(); %}` is a parse error ("Unexpected token,
+ * Expecting ';'").  A parse error kills the whole render, fw4_post.nft comes
+ * out empty, and the health gate silently keeps the previous ruleset, so a
+ * template that fails this way does not look broken at all.  r41 shipped
+ * `{% set node_addr_v4 = node_addr_to_nftarr(4); %}` and never rendered once.
+ *
+ * Both helpers take run_dir as a parameter rather than closing over it.  In
+ * this ucode a closure captures the block variables that already exist where
+ * the function is DEFINED, not where it is called: a function defined above
+ * `const run_dir` cannot see run_dir even when it is called far below, and
+ * the error is "Reference error: access to undeclared variable run_dir" -
+ * which reads as though run_dir were missing, when it is in fact declared 80
+ * lines above the call.  Passing it in is the only spelling that works. */
+const node_protect = node_addr_protected(run_dir);
+const node_addr_v4 = node_addr_to_nftarr(run_dir, 4);
+const node_addr_v6 = node_addr_to_nftarr(run_dir, 6);
 
 /* UCI config start */
 const cfgname = 'homeproxy';
@@ -458,8 +477,6 @@ set homeproxy_routing_port {
 
    An empty set is harmless: nft accepts one with no elements, and the cost is
    one lookup per packet until the first answer back-fills it. #}
-{% set node_protect = node_addr_protected(); %}
-{% set node_addr_v4 = node_addr_to_nftarr(4); %}
 {% if (node_protect): %}
 set homeproxy_node_addr_v4 {
 	type ipv4_addr
@@ -471,7 +488,6 @@ set homeproxy_node_addr_v4 {
 }
 {% endif %}
 {% if (node_protect && v6_handled): %}
-{% set node_addr_v6 = node_addr_to_nftarr(6); %}
 set homeproxy_node_addr_v6 {
 	type ipv6_addr
 	flags interval

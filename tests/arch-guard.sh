@@ -2971,6 +2971,41 @@ else
 	pass "  have returned null silently and shipped an empty-of-meaning export"
 fi
 
+# guard 56: no `{% set %}` tag assigns the result of a function call.
+#
+# utpl's set tag takes a plain expression and rejects a call outright:
+# `{% set x = f(); %}` is a parse error.  The damage is disproportionate to
+# the typo, because a parse error kills the whole render - firewall_post.ut
+# produces a zero-byte fw4_post.nft, fw4 has nothing new to load, and the
+# health gate quietly keeps the previous ruleset.  Nothing looks broken: the
+# service is up, the proxy works, and the template change is simply absent.
+# r41 shipped such a line and never rendered once; r43 fixed it.
+#
+# So the rule is mechanical and worth pinning: inside a set tag, no `(`.
+set_call="$(python3 - "$SCRIPTS" <<'PY_SET'
+import re, sys, pathlib
+bad = []
+for p in sorted(pathlib.Path(sys.argv[1]).rglob("*.ut")):
+    src = p.read_text(errors="replace")
+    # Comments quote the mistake on purpose; only real tags count.
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
+    for m in re.finditer(r"\{%-?\s*set\b([^%]*?)-?%\}", src, flags=re.S):
+        rhs = m.group(1)
+        # A call is any identifier immediately followed by "(".
+        if re.search(r"[A-Za-z_][A-Za-z0-9_.]*\s*\(", rhs):
+            bad.append("%s: {%% set%s%%}" % (p.name, rhs.strip()))
+print("\n".join(bad))
+PY_SET
+)"
+if [ -n "$set_call" ]; then
+	fail "a {% set %} tag assigns a function call; utpl rejects it, and the parse error"
+	fail "zeroes the whole render instead of failing visibly:"
+	printf '      %s\n' "$set_call"
+else
+	pass "no {% set %} tag calls a function (utpl would reject it and the whole render"
+	pass "  would silently collapse to an empty ruleset)"
+fi
+
 echo
 printf '%s checks, %s failures\n' "$checks" "$([ "$FAILED" = 0 ] && echo 0 || echo 'nonzero')"
 if [ "$FAILED" != 0 ]; then

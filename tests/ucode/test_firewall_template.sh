@@ -131,12 +131,12 @@ trap '[ "$OWN_STAGE" = 1 ] && rm -rf "$STAGE"' EXIT INT TERM
 # `elements = { ... }` line and nothing else.  Deciding whether the set and the
 # return rules exist at all belongs to node_protect, which is true when either
 # export file has content.
-if ! grep -q 'function node_addr_protected()' "$TEMPLATE_SRC"; then
+if ! grep -q 'function node_addr_protected(run_dir)' "$TEMPLATE_SRC"; then
 	echo "FAIL: firewall_post.ut has no node_addr_protected(); the node bypass cannot"
 	echo "      distinguish 'nothing to protect' from 'a host name dnsmasq will resolve'"
 	FAILED=1
 else
-	np_body="$(sed -n '/function node_addr_protected()/,/^}/p' "$TEMPLATE_SRC")"
+	np_body="$(sed -n '/function node_addr_protected(run_dir)/,/^}/p' "$TEMPLATE_SRC")"
 	for f in node-addr-ips.txt node-addr-domains.txt; do
 		if ! printf '%s' "$np_body" | grep -q "$f"; then
 			echo "FAIL: node_addr_protected() does not look at $f"
@@ -145,6 +145,22 @@ else
 	done
 	[ "$FAILED" -eq 0 ] && echo "PASS: node_addr_protected() covers both export files"
 fi
+
+# Both helpers read run_dir, and they are defined ~80 lines above its
+# declaration.  In this ucode a closure captures the block variables that exist
+# where the function is DEFINED, so a function defined earlier cannot see a
+# const declared later - the call fails with "access to undeclared variable
+# run_dir" while run_dir sits right there in the file.  Passing it in is the
+# only spelling that works, and r43 is what proved it.
+for fn in node_addr_protected node_addr_to_nftarr; do
+	if ! grep -q "function $fn(run_dir" "$TEMPLATE_SRC"; then
+		echo "FAIL: $fn does not take run_dir as a parameter; in this ucode a closure only"
+		echo "      sees block variables declared before the function definition, and both"
+		echo "      helpers are defined above run_dir"
+		FAILED=1
+	fi
+done
+[ "$FAILED" -eq 0 ] && echo "PASS: the node-address helpers take run_dir as a parameter"
 
 # Every consumer of the v4 set outside its own elements= line must be gated on
 # node_protect.  `node_addr_v4)` as a condition is exactly the mistake.
