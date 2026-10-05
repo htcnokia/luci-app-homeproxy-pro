@@ -312,6 +312,34 @@ const control_info = {};
 for (let i in control_options)
 	control_info[i] = uci.get(cfgname, 'control', i);
 
+/* Devices of the wan zone, resolved by fw4 itself.
+ *
+ * The intercept layer must not cover the wan side.  When the user names
+ * interfaces the guards below use exactly those; when the option is empty the
+ * UI says "all", and "all" used to include wan - so wan-inbound traffic to the
+ * router's own address on a routing_port was captured by the redirect / tproxy
+ * jump and by the DNS hijack as well.  It happened to be masked on the device
+ * (dnsmasq's own dns_redirect suppressed the DNS half, fw4's input policy
+ * dropped the rest), but the hole was structural: any wan-side service on one
+ * of the routing ports would have been hijacked.  Empty now means "everything
+ * except the wan zone".
+ *
+ * fw4's own ruleset template renders zone devices from `zone.match_devices`,
+ * so this asks the same source.  A render outside fw4 (the off-target test
+ * harness has no zone state) leaves the list empty and the guards below fall
+ * back to the previous behaviour. */
+let wan_devices = [];
+
+try {
+	for (let zone in fw4.zones())
+		if (zone.name === 'wan')
+			for (let device in zone.match_devices)
+				push(wan_devices, device);
+}
+catch (e) { }
+
+wan_devices = sort(uniq(wan_devices));
+
 const dns_redirect = uci.get(cfgname, 'infra', 'dns_redirect') || '1';
 const dns_hijacked = uci.get('dhcp', '@dnsmasq[0]', 'dns_redirect') || '0',
       /* dnsmasq's own port - NOT the sing-box DNS inbound port (infra.dns_port,
@@ -503,6 +531,8 @@ chain dstnat {
 {% if ((dns_redirect === '1') && (dns_hijacked !== '1')): %}
 	{% if (control_info.listen_interfaces): %}
 	meta iifname {{ iface_to_nftarr(control_info.listen_interfaces) }}
+	{%- elif (!isEmpty(wan_devices)): %}
+	meta iifname != {{ array_to_nftarr(wan_devices) }}
 	{%- endif /* listen_interfaces */ %}
 	meta nfproto { ipv4, ipv6 } udp dport 53 counter redirect to :{{ dnsmasq_port }} comment "!{{ cfgname }}: DNS hijack"
 {% endif /* dns_hijacked */ %}
@@ -527,6 +557,8 @@ chain homeproxy_redirect_proxy_port {
 chain homeproxy_redirect_lanac {
 	{% if (control_info.listen_interfaces): %}
 	meta iifname != {{ iface_to_nftarr(control_info.listen_interfaces) }} counter return
+	{% elif (!isEmpty(wan_devices)): %}
+	meta iifname {{ array_to_nftarr(wan_devices) }} counter return comment "!{{ cfgname }}: not the WAN side"
 	{% endif %}
 	meta mark {{ self_mark }} counter return
 
@@ -656,6 +688,8 @@ chain homeproxy_mangle_mark {
 chain homeproxy_mangle_lanac {
 	{% if (control_info.listen_interfaces): %}
 	meta iifname != {{ iface_to_nftarr([...control_info.listen_interfaces, 'lo']) }} counter return
+	{% elif (!isEmpty(wan_devices)): %}
+	meta iifname {{ array_to_nftarr(wan_devices) }} counter return comment "!{{ cfgname }}: not the WAN side"
 	{% endif %}
 	meta iifname != lo udp dport 53 counter return
 	meta mark {{ self_mark }} counter return
@@ -818,6 +852,8 @@ chain homeproxy_mangle_lanac {
 
 	{% if (control_info.listen_interfaces): %}
 	meta iifname != {{ iface_to_nftarr(control_info.listen_interfaces) }} counter return
+	{% elif (!isEmpty(wan_devices)): %}
+	meta iifname {{ array_to_nftarr(wan_devices) }} counter return comment "!{{ cfgname }}: not the WAN side"
 	{% endif %}
 
 	{% if (control_info.lan_proxy_mode === 'listed_only'): %}
