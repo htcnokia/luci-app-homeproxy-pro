@@ -196,6 +196,13 @@ function release_lock() {
 
 function main() {
 	const node_cache = {};
+
+	/* Duplicate detection, kept apart from node_cache on purpose: node_cache
+	 * is keyed by *section name* now (the Repository uses that key as the
+	 * section it writes), so folding a content fingerprint into it would make
+	 * the fingerprint look like a section. */
+	const conf_seen = {};
+	const name_seen = {};
 	const node_result = [];
 
 	const ubus = connect();
@@ -217,6 +224,8 @@ function main() {
 		url = replace(url, /#.*$/, '');
 		const groupHash = md5(url);
 		node_cache[groupHash] = {};
+		conf_seen[groupHash] = {};
+		name_seen[groupHash] = {};
 
 		/* Keep the lock's mtime current for as long as this run is alive.
 		 * The stale window (LOCK_STALE) is what lets a later run reclaim a
@@ -250,7 +259,7 @@ function main() {
 
 			if (filter_check(flat.label, filter_mode, filter_keywords, log))
 				log(sprintf('Skipping blacklist node: %s.', flat.label));
-			else if (node_cache[groupHash][confHash] || node_cache[groupHash][nameHash])
+			else if (conf_seen[groupHash][confHash])
 				log(sprintf('Skipping duplicate node: %s.', flat.label));
 			else {
 				/* normalize() first: the canonical Node is the only
@@ -283,9 +292,28 @@ function main() {
 
 				apply_policy(node_canonical, { allow_insecure, packet_encoding });
 
+				/* Two different servers can carry the same label - it is
+				 * whatever the provider put after '#' - and section names
+				 * hash the label, so the second one used to be dropped
+				 * here ("Skipping duplicate node") and, even if it were
+				 * let through, would have been written into the first
+				 * one's section.  Disambiguate with the content
+				 * fingerprint: the first keeps md5(group + label) (so
+				 * existing sections and every reference to them survive
+				 * an upgrade), the collision gets a key of its own. */
+				let section_key = nameHash;
+
+				if (name_seen[groupHash][nameHash]) {
+					section_key = md5(groupHash + label + '\x00' + confHash);
+					log(sprintf('Two servers are labelled %s; keeping both (section %s).',
+						flat.label, section_key));
+				}
+
+				conf_seen[groupHash][confHash] = true;
+				name_seen[groupHash][nameHash] = true;
+
 				push(node_result, [ node_canonical ]);
-				node_cache[groupHash][confHash] = node_canonical;
-				node_cache[groupHash][nameHash] = node_canonical;
+				node_cache[groupHash][section_key] = node_canonical;
 
 				count++;
 			}

@@ -104,6 +104,25 @@ function content_key(flat) {
 	return md5(join('\n', parts));
 }
 
+/* The section name the orchestrator keyed this node under.
+ *
+ * Normally md5(grouphash + label).  When two servers of one subscription share
+ * a label the orchestrator disambiguates the key with the content fingerprint,
+ * and the section has to follow it - otherwise both nodes are written into the
+ * same section and one of them is lost.  Returns null for a node the caller did
+ * not put in the cache (the unit tests hand nodes in directly), which keeps the
+ * previous behaviour as the fallback. */
+function section_name_for(node, cache) {
+	if (!cache)
+		return null;
+
+	for (let key in keys(cache))
+		if (cache[key] === node)
+			return key;
+
+	return null;
+}
+
 /* group hash -> { content_key: canonical node }, built once and only when a
  * section was not found by name: a run without renames pays nothing. */
 function build_content_index(node_cache) {
@@ -230,7 +249,12 @@ function apply_nodes(uci, uciconfig, ucinode, node_cache, node_result, log) {
 			 * identically - four nodes collapsed into one section mixing
 			 * several protocols' options. Accept either. */
 			const label = node.label || node.name;
-			const nameHash = md5(node.grouphash + label);
+
+			/* The orchestrator's key is the section name: identical to
+			 * md5(grouphash + label) for every node but the ones whose
+			 * label is shared by a different server. */
+			const nameHash = section_name_for(node, node_cache[node.grouphash])
+				|| md5(node.grouphash + label);
 
 			/* The one boundary where a canonical Node becomes UCI keys.
 			 *

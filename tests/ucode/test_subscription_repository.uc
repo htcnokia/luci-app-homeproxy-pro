@@ -512,6 +512,53 @@ expect('scrub: clean state changes nothing', scrub2.changed, 0);
 		uci4.get_all(CFG, survived[0]).label, 'renamed-dup');
 }
 
+/* --- the orchestrator's key is the section name ----------------------- */
+
+/* Two servers of one subscription can share a label - it is whatever the
+ * provider put after '#'.  The orchestrator keeps both and separates them by
+ * the content fingerprint, so the second node sits in the cache under a key
+ * that is NOT md5(grouphash + label).  The repository has to write that key as
+ * the section name, or both nodes end up in one section and one is lost. */
+{
+	const uci5 = cursor(ARGV[0]);
+	uci5.load(CFG);
+
+	const groupS = 'groupSharedLabel';
+	const s_first = canonical_node({
+		grouphash: groupS,
+		label: 'same-label',
+		type: 'vless',
+		address: 'first.example.com',
+		port: '443'
+	});
+	const s_second = canonical_node({
+		grouphash: groupS,
+		label: 'same-label',
+		type: 'vless',
+		address: 'second.example.com',
+		port: '443'
+	});
+	const disambiguated = md5(groupS + 'same-label' + chr(0x00) + 'different-content');
+	const s_cache = {
+		[groupS]: {
+			[md5(groupS + 'same-label')]: s_first,
+			[disambiguated]: s_second
+		}
+	};
+
+	const s_result = Repository.apply_nodes(uci5, CFG, TYPE, s_cache,
+		[[ s_first ], [ s_second ]], LOG);
+	expect('shared label: both nodes are added', s_result.added, 2);
+
+	uci5.commit(CFG);
+	uci5.load(CFG);
+
+	expect('shared label: the first is under md5(grouphash + label)',
+		uci5.get_all(CFG, md5(groupS + 'same-label')).address, 'first.example.com');
+	expect('shared label: the second is under the disambiguated key',
+		uci5.get_all(CFG, disambiguated).address, 'second.example.com');
+}
+
 const MD5_CJK = chr(0xe4) + chr(0xb8) + chr(0xad) + chr(0xe6) + chr(0x96) + chr(0x87);
 const MD5_EMOJI = chr(0xf0) + chr(0x9f) + chr(0x98) + chr(0x80);
 
