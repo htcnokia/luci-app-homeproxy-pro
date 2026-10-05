@@ -116,8 +116,9 @@ function build_route_proxy(config, dm, ctx, direct_overrides) {
 	 * as mainland.  It used to be geoip-cn, with china-ip added later as a
 	 * correction for the two disagreeing - two rule-sets, one of them
 	 * redundant in this mode, neither able to see the other's data. */
-	if (ctx.routing_mode === 'bypass_mainland_china'
-		|| ctx.routing_mode === 'proxy_mainland_china') {
+	if (ctx.china_ip4_ready
+		&& (ctx.routing_mode === 'bypass_mainland_china'
+			|| ctx.routing_mode === 'proxy_mainland_china')) {
 		push(config.route.rules, {
 			action: 'resolve',
 			strategy: (ctx.ipv6_support !== '1') ? 'prefer_ipv4' : null
@@ -222,11 +223,19 @@ function build_route_proxy(config, dm, ctx, direct_overrides) {
 	 *                resolver to the mode default, so declaring it there would
 	 *                load 111k suffixes for a rule that does not exist. */
 	if (declaresBuiltinRuleSets(ctx.routing_mode)) {
-		push(config.route.rule_set, {
-			type: 'local',
-			tag: 'china-ip',
-			path: HP_DIR + '/resources/china_ip4.json'
-		});
+		/* Declared only when the file is actually there - the same rule the v6
+		 * and domain halves already follow, and the reason a fresh install no
+		 * longer dies: a `path` that does not exist fails `sing-box check` and
+		 * takes the whole configuration (and the service) with it.  The
+		 * rule-set is produced before generation now, so this is the
+		 * belt-and-braces case (a failed generation, a read-only fs). */
+		if (ctx.china_ip4_ready) {
+			push(config.route.rule_set, {
+				type: 'local',
+				tag: 'china-ip',
+				path: HP_DIR + '/resources/china_ip4.json'
+			});
+		}
 
 		/* Declared only when the file is actually there: a rule_set pointing
 		 * at a missing file takes the whole config down with it, and a router

@@ -137,6 +137,7 @@ export function build_context(dm, env) {
 		 * and one of them naming a tag the other never declared fails the
 		 * whole config.  Default false - an absent env must not turn into an
 		 * optimistic "assume the file is there". */
+		china_ip4_ready: (env?.china_ip4_ready === true),
 		china_ip6_ready: (env?.china_ip6_ready === true),
 		/* Whether china-domain.json is on disk.  Same one-sided default as
 		 * the field above, for the same reason: it is a filesystem fact the
