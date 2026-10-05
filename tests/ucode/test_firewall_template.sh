@@ -231,12 +231,48 @@ if ! ucode -e 'require("fw4");' > "/dev/null" 2>&1; then
 	exit $FAILED
 fi
 
+# Where the render reads its UCI from.
+#
+#   * on a target: the real /etc/config - the render has to see the
+#     configuration that is actually deployed;
+#   * anywhere else (CI): tests/fixtures/firewall/render.uci, so this layer -
+#     the only one that turns the template into nft text - runs in CI instead
+#     of reporting NOT RUN.  That is T1's other half: the module it needs is
+#     staged by the toolchain (tests/toolchain/build-ucode-linux.sh) and the
+#     configuration it reads is staged here.
+#
+# HP_T_FW4_CONFIG_DIR overrides both, which is how the fixture path itself is
+# exercised on a device (real fw4, fixture config).
+FW4_CONFIG_DIR="${HP_T_FW4_CONFIG_DIR:-}"
+if [ -z "$FW4_CONFIG_DIR" ] && [ ! -f "/etc/config/homeproxy" ]; then
+	FW4_CONFIG_DIR="$STAGE/cfg"
+	mkdir -p "$FW4_CONFIG_DIR"
+	cp "$ROOT/tests/fixtures/firewall/render.uci" "$FW4_CONFIG_DIR/homeproxy"
+	cp "$ROOT/tests/fixtures/firewall/dhcp" "$FW4_CONFIG_DIR/dhcp"
+fi
+
 # The template is written for a device: it imports homeproxy.uc through
 # /etc/homeproxy/scripts/ and reads /etc/homeproxy/resources. Neither exists
 # off-target, so render a staged copy with those prefixes rewritten to the
 # checkout - the same trick run.sh uses for the absolute import in
-# root/usr/share/rpcd/ucode/luci.homeproxy.
-sed -e "s#'/etc/homeproxy/#'$ROOT/root/etc/homeproxy/#g" "$TEMPLATE_SRC" > "$STAGED"
+# root/usr/share/rpcd/ucode/luci.homeproxy.  The cursor is rewritten too when
+# the UCI comes from the fixture rather than from /etc/config.
+if [ -n "$FW4_CONFIG_DIR" ]; then
+	sed -e "s#'/etc/homeproxy/#'$ROOT/root/etc/homeproxy/#g" \
+	    -e "s#^const uci = cursor();#const uci = cursor('$FW4_CONFIG_DIR');#" \
+	    "$TEMPLATE_SRC" > "$STAGED"
+else
+	sed -e "s#'/etc/homeproxy/#'$ROOT/root/etc/homeproxy/#g" "$TEMPLATE_SRC" > "$STAGED"
+fi
+
+# Hard guard: the cursor rewrite has to have matched, or the render silently
+# reads a configuration that is not there (and the assertions would be about a
+# ruleset nobody asked for).
+if [ -n "$FW4_CONFIG_DIR" ] && ! grep -qF "cursor('$FW4_CONFIG_DIR')" "$STAGED"; then
+	echo "FAIL: firewall_post.ut: could not point the render at $FW4_CONFIG_DIR"
+	echo "      (the 'const uci = cursor();' anchor no longer matches)"
+	exit 1
+fi
 
 # Hard guard: if the prefix ever changes, the sed silently no-ops and the
 # render fails for an unrelated reason, which would look like a template
