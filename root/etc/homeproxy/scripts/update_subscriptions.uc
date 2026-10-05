@@ -387,9 +387,41 @@ function main() {
 	 *
 	 * commit() returns true on success, so a failure is detected here rather
 	 * than by generating a configuration from a half-written file. */
+	const config_before_commit = readfile(CONFIG_FILE);
+
 	if (uci.commit(uciconfig) !== true) {
 		log('FAILED to commit the new configuration; the previous configuration is kept.');
 		return false;
+	}
+
+	/* Nothing changed: the commit rewrote the same bytes.  Every mutation was
+	 * a no-op - the subscription returned exactly the nodes that are already
+	 * stored, none was added, removed, renamed or updated, no reference
+	 * needed repairing.
+	 *
+	 * Reloading here means stop+start of both instances for a configuration
+	 * that is already running, and during that window stop_service keeps the
+	 * DNS layer pointing at sing-box's dns-in while the intercept layer is
+	 * gone - "a few seconds of failed lookups" in its own words - for
+	 * nothing.  Measured on the device: a client configuration that differs
+	 * only in `control.listen_interfaces`, `control.lan_direct_ipv4_ips` or
+	 * `control.wan_direct_ipv4_ips` renders byte-identical, so the generated
+	 * bytes are the strongest signal available here (they also catch an
+	 * option updated in place, which the added/removed counts cannot see).
+	 *
+	 * Not reloading is safe *because* nothing changed: this script's only
+	 * side effect is this file.  The rule-sets, the nft sets, the DNS
+	 * snippets and the crontab all derive from it, and the Repository staged
+	 * every mutation on the one cursor above - so there is nothing that
+	 * could have been left unapplied.  (The init script must NOT grow the
+	 * same shortcut: a reload also re-applies layers that do not reach the
+	 * generated file, so "bytes equal" is not a licence to skip it there.) */
+	if ((readfile(CONFIG_FILE) || '') === (config_before_commit || '')) {
+		log(sprintf('%s nodes added, %s removed, %s orphaned; nothing changed, the service was not reloaded.',
+			added, removed, orphaned));
+		log('Successfully updated subscriptions.');
+
+		return true;
 	}
 
 	/* Reload once, after the whole candidate set is committed
