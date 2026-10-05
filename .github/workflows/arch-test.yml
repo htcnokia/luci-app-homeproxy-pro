@@ -29,7 +29,17 @@ on:
   workflow_call:
 
 concurrency:
-  group: arch-${{ github.ref }}
+  # The event name is part of the group on purpose.  build.yml calls this
+  # workflow (needs: [test]) to make a release depend on the suite, and a
+  # push to main triggers it too - with the SAME github.ref, so they collided
+  # in one group and cancel-in-progress killed whichever started second.  A
+  # release built that way showed a red X on an otherwise green commit: the
+  # build's own `test / arch-test` had run to completion, but the
+  # push-triggered one sitting in the same group was cancelled 17 seconds in.
+  # That is noise, not a quality signal, and it hides real failures.  Keying on
+  # the event keeps the two apart, so a push still supersedes an older push and
+  # a rebuild still supersedes an older rebuild.
+  group: arch-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:

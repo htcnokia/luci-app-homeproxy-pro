@@ -16,7 +16,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-${{ github.ref }}
+  # Event name in the group, same reason as arch-test.yml: a manual dispatch and
+  # a tag push share github.ref, so without it a rebuild would silently cancel
+  # an in-flight release (or a release would cancel a manual build) and leave a
+  # red X on a commit whose real gate had already passed.  A newer build of the
+  # SAME kind still supersedes the older one, which is what this is for.
+  group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
