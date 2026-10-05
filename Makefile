@@ -41,7 +41,7 @@ LUCI_DEPENDS:= \
 
 PKG_NAME:=luci-app-homeproxy
 PKG_VERSION:=28.10.1.14
-PKG_RELEASE:=46
+PKG_RELEASE:=47
 
 LUCI_BASENAME:=homeproxy
 
