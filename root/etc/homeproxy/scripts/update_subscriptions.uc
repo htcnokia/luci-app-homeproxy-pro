@@ -316,6 +316,17 @@ function main() {
 	const added = repository_result.added,
 	      removed = repository_result.removed;
 
+	/* A subscription URL the user deleted leaves its nodes without a cache
+	 * entry, which apply_nodes() treats as "the fetch failed, keep them" - so
+	 * they stayed in the configuration forever (still in the sing-box outbounds
+	 * and urltest pools, and shown in the Nodes tab like a user node).  The
+	 * configured URL set is the one thing that tells the two cases apart, and
+	 * this function has it; `node_cache` is keyed by every URL this run
+	 * processed, including the ones whose fetch failed. */
+	const orphaned = Repository.prune_orphan_nodes(
+		uci, uciconfig, ucinode, keys(node_cache), log
+	);
+
 	/* The 6 inline uci.set/commit sites
 	 * (main_urltest_nodes cleanup, main_node switch on missing
 	 * target, main_udp_urltest_nodes cleanup, main_udp_node
@@ -383,7 +394,7 @@ function main() {
 		 * sing-box check warning that was truncated out of view. */
 		log('Warning: reload stderr was truncated (>512 KiB); the captured output is incomplete.');
 
-	log(sprintf('%s nodes added, %s removed.', added, removed));
+	log(sprintf('%s nodes added, %s removed, %s orphaned.', added, removed, orphaned));
 	log('Successfully updated subscriptions.');
 }
 

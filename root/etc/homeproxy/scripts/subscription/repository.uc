@@ -324,8 +324,48 @@ function scrub_stale_urltest_refs(uci, uciconfig, log) {
 	return { changed };
 }
 
+/* Remove subscription nodes whose group is no longer configured at all.
+ *
+ * apply_nodes() deliberately leaves a group alone when the fetch produced
+ * nothing for it - that is the transient-blip protection (a failed fetch must
+ * not delete the user's nodes).  The same "no cache entry" state also arises
+ * when the user deletes the subscription URL from the configuration, and then
+ * the nodes stayed in /etc/config/homeproxy forever, still compiled into the
+ * sing-box outbounds and urltest pools while the UI showed them as ordinary
+ * nodes.  Only the orchestrator knows which URLs are still configured, so the
+ * set is passed in explicitly: a group that is configured but produced no cache
+ * is kept (blip), a group that is not configured is pruned (subscription
+ * removed).
+ *
+ * A section without a grouphash is a user-created node and is never touched.
+ * Returns the number of pruned sections.
+ */
+function prune_orphan_nodes(uci, uciconfig, ucinode, configured_groups, log) {
+	let pruned = 0;
+	const configured = {};
+
+	for (let group in configured_groups)
+		configured[group] = true;
+
+	uci.foreach(uciconfig, ucinode, (cfg) => {
+		if (!cfg.grouphash)
+			return null;
+
+		if (configured[cfg.grouphash])
+			return null;
+
+		uci.delete(uciconfig, cfg['.name']);
+		pruned++;
+		log(sprintf('Removing node of a removed subscription: %s.', cfg.label || cfg['.name']));
+		return null;
+	});
+
+	return pruned;
+}
+
 export const Repository = {
 	apply_nodes,
 	apply_main_node_refs,
-	scrub_stale_urltest_refs
+	scrub_stale_urltest_refs,
+	prune_orphan_nodes
 };
