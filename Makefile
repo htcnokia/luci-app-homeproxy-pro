@@ -7,6 +7,16 @@ include $(TOPDIR)/rules.mk
 
 LUCI_TITLE:=The modern ImmortalWrt proxy platform for ARM64/AMD64 (sing-box 1.14)
 LUCI_PKGARCH:=all
+
+# `cron` is a real dependency, not a convenience: runtime/service.sh writes two
+# entries into /etc/crontabs/root and calls `/etc/init.d/cron restart`
+# (hp_sync_resource_cron, hp_sync_autoupdate_cron, hp_clear_autoupdate_cron),
+# and the resource-list refresh and the subscription update only ever run from
+# those entries.  Without the package the writes still succeed - a crontab file
+# is just a file - so the router looks fine while neither the China lists nor
+# the subscriptions are ever refreshed again, and the only trace is a Warning
+# in the log from the failed `cron restart`.  Most images ship it, which is
+# exactly why the omission went unnoticed.
 LUCI_DEPENDS:= \
 	+sing-box \
 	+firewall4 \
@@ -14,6 +24,7 @@ LUCI_DEPENDS:= \
     +ip-full \
     +kmod-tun \
 	+uclient-fetch \
+	+cron \
 	+ucode-mod-digest
 
 PKG_NAME:=luci-app-homeproxy
