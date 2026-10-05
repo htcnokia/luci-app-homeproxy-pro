@@ -78,6 +78,55 @@ import { flatten } from '../parser/flatten.uc';
  *
  * Returns the { added, removed } counts. No commit here: the caller's
  * single commit is the boundary of "this run wrote something". */
+/* --- content identity ---------------------------------------------------- */
+
+/* A fingerprint of a node's *content*: the same server with the same
+ * credentials and options, whatever it is called.
+ *
+ * Section names are md5(grouphash + label), so a subscription that renames a
+ * node used to make the repository delete the old section and create a new one
+ * - and every reference to it (`main_node`, `main_udp_node`, the urltest lists)
+ * was switched away or dropped along with it, silently.  The label is not part
+ * of a node's identity, so it is excluded here along with the section metadata
+ * and the group hash (the group is already the lookup key).
+ *
+ * Keys are sorted so the fingerprint cannot depend on insertion order, and the
+ * values are serialized with %J because UCI options can be lists. */
+function content_key(flat) {
+	const parts = [];
+
+	for (let k in sort(keys(flat))) {
+		if (k === 'label' || k === 'grouphash' || substr(k, 0, 1) === '.')
+			continue;
+		push(parts, k + '=' + sprintf('%J', flat[k]));
+	}
+
+	return md5(join('\n', parts));
+}
+
+/* group hash -> { content_key: canonical node }, built once and only when a
+ * section was not found by name: a run without renames pays nothing. */
+function build_content_index(node_cache) {
+	const index = {};
+
+	for (let group in keys(node_cache)) {
+		const group_index = index[group] = {};
+		const done = {};
+		const cache = node_cache[group];
+
+		for (let key in keys(cache)) {
+			const node = cache[key];
+
+			if (done[node])
+				continue;
+			done[node] = true;
+			group_index[content_key(flatten(node))] = node;
+		}
+	}
+
+	return index;
+}
+
 function apply_nodes(uci, uciconfig, ucinode, node_cache, node_result, log) {
 	let added = 0, removed = 0;
 	/* Mark the canonical Node objects the foreach loop above has
@@ -88,6 +137,9 @@ function apply_nodes(uci, uciconfig, ucinode, node_cache, node_result, log) {
 	 * Repository the same Node instances, and tying the marker to the
 	 * object means a stale string key cannot match a renamed node. */
 	const seen = {};
+
+	/* Built on the first section that is not found by name (see below). */
+	let content_index = null;
 
 	uci.foreach(uciconfig, ucinode, (cfg) => {
 		/* User-created nodes do not have a grouphash. The
@@ -103,7 +155,31 @@ function apply_nodes(uci, uciconfig, ucinode, node_cache, node_result, log) {
 		if (!node_cache[cfg.grouphash] || length(node_cache[cfg.grouphash]) === 0)
 			return null;
 
-		const incoming = node_cache[cfg.grouphash][cfg['.name']];
+		let incoming = node_cache[cfg.grouphash][cfg['.name']];
+
+		if (!incoming) {
+			/* Not found by section name: the node may simply have been
+			 * renamed upstream.  Section names hash the label, so without
+			 * this the repository would delete the section and add an
+			 * identical one under a new name, taking every reference to it
+			 * (`main_node`, `main_udp_node`, urltest members) with it - the
+			 * user's node selection silently moves to another server. */
+			if (content_index === null)
+				content_index = build_content_index(node_cache);
+
+			const key = content_key(cfg);
+
+			incoming = content_index[cfg.grouphash][key];
+
+			if (incoming) {
+				/* Claim it: two stored sections with the same content must
+				 * not both update themselves into the same node, or the
+				 * duplicate would never be pruned. */
+				delete content_index[cfg.grouphash][key];
+				log(sprintf('Node was renamed upstream: %s -> %s; keeping its section and every reference to it.',
+					cfg.label || cfg['.name'], incoming.label || incoming.name));
+			}
+		}
 
 		if (!incoming) {
 			uci.delete(uciconfig, cfg['.name']);
