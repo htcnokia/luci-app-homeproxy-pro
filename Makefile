@@ -15,8 +15,21 @@ LUCI_PKGARCH:=all
 # those entries.  Without the package the writes still succeed - a crontab file
 # is just a file - so the router looks fine while neither the China lists nor
 # the subscriptions are ever refreshed again, and the only trace is a Warning
-# in the log from the failed `cron restart`.  Most images ship it, which is
-# exactly why the omission went unnoticed.
+# in the log from the failed `cron restart`.
+#
+# DO NOT add `+cron` back.  There is no package by that name: ImmortalWrt
+# 25.12.2's feeds carry 11 496 packages and none of them is called `cron`, and
+# /etc/init.d/cron is a file of *busybox* (whose apk metadata provides only
+# `busybox-any`).  An unsatisfiable dependency is not a missing-feature warning,
+# it makes the package impossible to install at all - apk refuses to select it,
+# and forcing the install (--force-broken-world) PURGES the installed package
+# instead.  Measured on 192.168.1.1: r44 with `+cron` could not be installed,
+# and the forced attempt removed the running package and left the router
+# unproxied until r44 (built before that line existed) was put back.
+#
+# The dependency the original change was reaching for is real - the cron entries
+# are load-bearing - but it is satisfied by busybox's crond, which every image
+# in this family ships and which cannot be removed without removing busybox.
 LUCI_DEPENDS:= \
 	+sing-box \
 	+firewall4 \
@@ -24,12 +37,11 @@ LUCI_DEPENDS:= \
     +ip-full \
     +kmod-tun \
 	+uclient-fetch \
-	+cron \
 	+ucode-mod-digest
 
 PKG_NAME:=luci-app-homeproxy
 PKG_VERSION:=28.10.1.14
-PKG_RELEASE:=45
+PKG_RELEASE:=46
 
 LUCI_BASENAME:=homeproxy
 
