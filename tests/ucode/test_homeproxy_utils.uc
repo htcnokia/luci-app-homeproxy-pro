@@ -139,6 +139,32 @@ if (canDriveFetchShapes) {
 	expect('fetch.binary-has-no-content', binfetch.content, null);
 }
 
+/* A truncated transfer must not look like a subscription.
+ *
+ * The fetch used to be `uclient-fetch -O - | head -c N`, and system() returns
+ * the last command's status - head's, always 0.  A response that declared 244
+ * bytes and delivered 80 therefore arrived as `{ content: <80 bytes>, error:
+ * null }`: a half-downloaded list would rewrite the node set and nothing
+ * anywhere said so.  wGETVerbose() now carries the fetcher's own status out of
+ * the pipeline through a file, and this is the shape that proves it.
+ *
+ * The stub is the only thing that can produce "non-empty body AND non-zero
+ * exit" (a real uhttpd sets Content-Length from the file it serves), so on a
+ * real-applet run this is skipped on purpose - the same path was measured by
+ * hand on the device with a truncated response: real uclient-fetch exits 4
+ * with "Connection reset prematurely" and wGETVerbose() reports
+ * `fetch exited with status 4: …`. */
+if (canDriveFetchShapes) {
+	if (realApplet) {
+		printf('SKIP: truncated-transfer shape (the real applet cannot be asked for a short body; device-verified by hand)\n');
+	} else {
+		const truncfetch = wGETVerbose('http://127.0.0.1:1/HP_T_STUB_TRUNCATED');
+		expect('fetch.truncated-is-not-a-success', truncfetch.content, null);
+		expect('fetch.truncated-reports-the-status',
+			match(truncfetch.error || '', /status 4/) != null, true, truncfetch.error);
+	}
+}
+
 /* Review H3: the fetcher announces the requested URL on stderr before it reports
  * anything else, query string and all, so this is what would reach the log.
  *
