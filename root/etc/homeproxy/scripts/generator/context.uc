@@ -67,6 +67,18 @@ export function build_context(dm, env) {
 	const self_mark = match(proxy_mode, /redirect/)
 		? (dm.infra.self_mark || '100') : null;
 
+	/* The same mark, but resolved for every mode.
+	 *
+	 * In TUN mode self_mark is null (see above), so no outbound carries
+	 * `routing_mark` and sing-box's own sockets carried no mark at all - which
+	 * meant the firewall's TUN output chain could not exempt them, and the
+	 * node-address bypass that exists for tproxy was missing for tun.  A LAN
+	 * client (or the router itself) dialling the node's own address went back
+	 * into the tunnel; measured earlier for tproxy ("wget hangs on the node's
+	 * address"), fixed there, never for tun.  route.default_mark stamps every
+	 * outbound socket with this value, and the TUN chain returns on it. */
+	const tun_self_mark = (dm.infra.self_mark || '100');
+
 	/* proxy-mode-derived ports / TUN params */
 	let redirect_port, tproxy_port, tun_name, tun_addr4, tun_addr6,
 	    tun_mtu, tcpip_stack, endpoint_independent_nat;
@@ -171,7 +183,7 @@ export function build_context(dm, env) {
 		 * with no initial_path silently declared as source JSON, and a binary
 		 * .srs fetched from a URL would then fail to parse at startup. */
 		ruleset_formats: (env?.ruleset_formats || {}),
-		self_mark, ntp_server, dns_port, mixed_port,
+		self_mark, tun_self_mark, ntp_server, dns_port, mixed_port,
 		redirect_port, tproxy_port,
 		tun_name, tun_addr4, tun_addr6, tun_mtu,
 		tcpip_stack, endpoint_independent_nat,

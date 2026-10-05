@@ -190,13 +190,23 @@ for chain in redirect mangle_prerouting mangle_output; do
 		FAILED=1
 	fi
 done
-v4_rules="$(grep -c 'ip daddr @homeproxy_node_addr_v4 counter return' "$TEMPLATE_SRC" || true)"
-if [ "$v4_rules" -eq 3 ]; then
-	echo "PASS: all three chains carry the node-address return rule"
-else
-	echo "FAIL: expected 3 'ip daddr @homeproxy_node_addr_v4 counter return' rules, found $v4_rules"
-	FAILED=1
-fi
+# Asserted per chain, not as a global count.  The global count is what this
+# check used to be ("expected 3"), and it is exactly how the missing rule went
+# unnoticed: the TUN chain needed one and the assertion counted the three that
+# already existed.  The four chains below are the ones that steer traffic into
+# the tunnel or the redirect/tproxy port - each must exempt the node's own
+# address once, so a new chain that starts steering traffic has to be added
+# here (and the operator reading the diff sees why).
+for chain in homeproxy_redirect homeproxy_mangle_prerouting homeproxy_mangle_output homeproxy_mangle_tun; do
+	body="$(awk -v c="$chain" 'index($0, "chain " c " {") == 1 { f = 1 } f { print } f && /^}/ { exit }' "$TEMPLATE_SRC")"
+	n="$(printf '%s\n' "$body" | grep -c 'ip daddr @homeproxy_node_addr_v4 counter return' || true)"
+	if [ "$n" -eq 1 ]; then
+		echo "PASS: $chain carries exactly one node-address return rule"
+	else
+		echo "FAIL: $chain carries $n node-address return rules (expected exactly 1)"
+		FAILED=1
+	fi
+done
 
 # Probe with ucode, not utpl: `utpl -e` is not an eval flag, it renders the
 # argument as template text and always succeeds.

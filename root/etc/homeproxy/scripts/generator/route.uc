@@ -174,6 +174,14 @@ function build_route_proxy(config, dm, ctx, direct_overrides) {
 	/* The route half of the mode's default policy - the other consumer of
 	 * ctx.proxy_fallback, and the reason dns.final and this line are
 	 * asserted together per mode. */
+	/* TUN mode carries no per-outbound `routing_mark` (self_mark is null there,
+	 * see context.uc), so sing-box's own dials - including the one to the node -
+	 * were unmarked and the firewall's TUN output chain captured them; the
+	 * node-address bypass existed for tproxy only.  `default_mark` stamps every
+	 * outbound socket with the same value the firewall's TUN chain exempts. */
+	if (match(ctx.proxy_mode, /tun/))
+		config.route.default_mark = strToInt(ctx.tun_self_mark);
+
 	config.route.final = ctx.proxy_fallback ? 'main-out' : 'direct-out';
 
 	/* --- proxy-mode rule_set block ----------------------------------- */
