@@ -312,4 +312,36 @@ if [ "$FAILED" -eq 0 ]; then
 	echo "PASS: the gfwlist gate follows the dnsmasq nftset capability"
 fi
 
+# The wan guard (S4): with `listen_interfaces` empty the intercept layer has to
+# exclude the wan zone's devices.  Two ways this went wrong on the device and
+# both render *something*, which is why the assertion is not just "a guard is
+# there":
+#
+#   - r46 shipped a template whose guard silently disappeared: fw4 had no state
+#     in this process (`zones()` is null outside fw4's own render), the loop
+#     threw, the catch swallowed it, and the rendered chain had no iifname at
+#     all - the exact hole the guard was added to close;
+#   - resolving it from /var/run/fw4.state instead yields the LOGICAL names
+#     ("wan", "wan_6"), so `meta iifname { wan }` renders and can never match.
+#
+# Resolving zone devices needs ubus, so off-target runs report SKIP rather than
+# pretending: the render needs fw4's real zone data for this one.
+GUARD_IFACES="$(grep -oE 'meta iifname( !=)? \{[^}]*\}' "$OUT" | sort -u | tr '\n' ' ')"
+case "$GUARD_IFACES" in
+*'{ wan }'*|*'{ wan,'*|*'wan_6 }'*|*'wan_6,'*)
+	echo "FAIL: the wan guard rendered a logical network name, which never matches:"
+	echo "      $GUARD_IFACES"
+	FAILED=1
+	;;
+esac
+
+if grep -q 'not the WAN side' "$OUT"; then
+	echo "PASS: the wan guard is rendered (resolved devices: ${GUARD_IFACES:-none})"
+elif ubus -v list network.interface > "/dev/null" 2>&1; then
+	echo "FAIL: the wan guard is missing although fw4 could resolve zone devices"
+	FAILED=1
+else
+	echo "SKIP: the wan guard needs ubus to resolve zone devices (not available here)"
+fi
+
 exit $FAILED

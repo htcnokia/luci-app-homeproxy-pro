@@ -347,7 +347,26 @@ for (let i in control_options)
 let wan_devices = [];
 
 try {
-	for (let zone in fw4.zones())
+	/* fw4.load() is what resolves a zone's *logical* networks to the devices
+	 * that actually appear in `iifname` - the wan zone is `network wan` but
+	 * the device is `pppoe-wan`, and this template runs OUTSIDE fw4's own
+	 * process, where the module has no state at all.  Two wrong answers were
+	 * measured on the device before this:
+	 *
+	 *   - no load at all: `zones()` is null, the loop threw, the catch left
+	 *     the list empty and the guard silently disappeared from the rendered
+	 *     ruleset (that is the state this package shipped in r46);
+	 *   - fw4.read_state(): parses /var/run/fw4.state, which carries the
+	 *     LOGICAL names ("wan", "wan_6"), so the guard rendered as
+	 *     `meta iifname { wan }` and could never match - a guard that looks
+	 *     present and does nothing.
+	 *
+	 * load() builds the model through ubus the same way fw4 itself does, and
+	 * yields match_devices = [ "pppoe-wan" ].  It is read-only, ~tens of ms,
+	 * and its warnings go to stderr, which the caller discards. */
+	fw4.load();
+
+	for (let zone in (fw4.zones() || []))
 		if (zone.name === 'wan')
 			for (let device in zone.match_devices)
 				push(wan_devices, device);
