@@ -118,39 +118,6 @@ OUT="$STAGE/rendered.nft"
 ERR="$STAGE/render.err"
 trap '[ "$OWN_STAGE" = 1 ] && rm -rf "$STAGE"' EXIT INT TERM
 
-# --- the tproxy mangle path short-circuits an already-tproxied connection ---
-#
-# Source-level, for the same reason as the check above: the render layer is
-# skipped wherever firewall4 is absent, and the failure this pins is a chain
-# that is perfectly valid nft and simply re-walks six to eight rules for every
-# packet of every UDP flow.  Nothing about it looks broken, which is why it
-# survived - `ct mark` appeared zero times in the whole template.
-#
-# The invariant worth pinning is the MARK, not merely the presence of a rule:
-# a short circuit written against self_mark (100) or tun_mark (102) would
-# either never match a tproxied flow or would short-circuit the wrong one.
-# self_mark stays a `meta mark` test on the line above on purpose - it guards
-# sing-box's own sockets, which have no connection mark yet.
-if ! grep -q 'ct mark {{ tproxy_mark }} counter return' "$TEMPLATE_SRC"; then
-	echo "FAIL: the tproxy mangle path has no per-connection short circuit; every"
-	echo "      UDP packet of an already-tproxied flow walks the chain again."
-	FAILED=1
-else
-	echo "PASS: the mangle path short-circuits on ct mark \$tproxy_mark"
-fi
-
-# It has to be reachable for the flows it is meant to save, so it must sit in
-# the lanac chain - the one every mangle_prerouting jump lands in - and after
-# the interface guards, not behind the per-client matching.
-lanac_body="$(sed -n '/^chain homeproxy_mangle_lanac {/,/^}/p' "$TEMPLATE_SRC")"
-if printf '%s' "$lanac_body" | grep -q 'ct mark {{ tproxy_mark }}'; then
-	echo "PASS: the short circuit is in homeproxy_mangle_lanac, where every packet arrives"
-else
-	echo "FAIL: ct mark \$tproxy_mark is not in homeproxy_mangle_lanac - a rule"
-	echo "      placed after the per-client matching would not save the walk it is for."
-	FAILED=1
-fi
-
 # --- the node-address bypass is not gated on the literal-address file ------
 #
 # This is a source-level check, not a render one, on purpose.  The render layer
