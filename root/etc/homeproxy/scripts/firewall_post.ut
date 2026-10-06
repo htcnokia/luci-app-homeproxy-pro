@@ -779,6 +779,33 @@ chain homeproxy_mangle_lanac {
 	meta iifname != lo udp dport 53 counter return
 	meta mark {{ self_mark }} counter return
 
+	{# Connection-level short circuit for packets of a connection that has
+	   already been tproxied.
+
+	   Without it every UDP packet walks this whole chain again: lanac ->
+	   prerouting -> tproxy_port -> tproxy, six to eight rule evaluations,
+	   to reach a decision that has not changed since the first packet.  QUIC,
+	   game traffic and voice are exactly the flows where this is felt - a
+	   single QUIC connection is thousands of packets through it.
+
+	   `ct mark` rather than `meta mark`, and that distinction is the whole
+	   point.  `meta mark` reads the mark on the packet in hand, and only the
+	   packet that was actually tproxied carries tproxy_mark - the later ones
+	   do not, so a `meta mark` test would not match them.  `ct mark` is
+	   per-connection, so once the first packet of a flow has been marked the
+	   rest of the flow returns here at the first rule after this one.
+
+	   The first packet of a flow still has no conntrack mark, so it falls
+	   through to the normal path and is tproxied - which is the intended
+	   behaviour, not a gap: exactly one packet per connection pays the full
+	   walk.
+
+	   Scoped to tproxy_mark (101) alone.  self_mark (100) above stays a packet
+	   test on purpose - it marks sing-box's own sockets, and those are not
+	   necessarily part of a connection with a ct mark yet.  tun_mark (102) is a
+	   different table and a different chain, untouched by this. #}
+	ct mark {{ tproxy_mark }} counter return comment "!{{ cfgname }}: already tproxied"
+
 	{% if (control_info.lan_proxy_mode === 'listed_only'): %}
 	{% if (nftarr.lan_proxy_ipv4_ips): %}
 	ip saddr {{ nftarr.lan_proxy_ipv4_ips }} counter goto homeproxy_mangle_prerouting
