@@ -378,5 +378,105 @@ reset_samples
 hp_wait_instance "sing-box-c" "$CFG" 1
 expect "wait_instance (compat): times out when down" "$?" "1"
 
+# --- hp_reload_is_noop -----------------------------------------------------
+# The reload short circuit.  Every case below is a reason the reload must NOT
+# be skipped, which is the direction that matters: a wrong skip reports success
+# over a dead or half-installed proxy, while a needless reload only costs the
+# eight seconds it was going to cost anyway.
+#
+# The helper reads three things off the filesystem and ubus.  ubus is stubbed
+# on PATH so the "is the instance running" question has an answer off-target;
+# the absence of that stub is itself one of the cases, because an environment
+# where the state cannot be established has to fall through to a real reload.
+CONF="$WORK/noop"
+mkdir -p "$CONF/candidate"
+printf 'same bytes\n' > "$CONF/sing-box-c.json"
+printf 'same bytes\n' > "$CONF/candidate/sing-box-c.json"
+
+mkdir -p "$WORK/noop-bin"
+cat > "$WORK/noop-bin/ubus" <<'EOF'
+#!/bin/sh
+# The service list reply, in the shape the helper greps for.
+cat <<JSON
+{"homeproxy":{"instances":{"sing-box-c":{"running":true,"pid":1234}}}}
+JSON
+EOF
+chmod +x "$WORK/noop-bin/ubus"
+# shellcheck source=/dev/null
+. "$RUNTIME/service.sh"
+
+PATH="$WORK/noop-bin:$PATH"
+export PATH
+
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: identical candidate, client running, no released intercept" "$?" "0"
+
+# The configuration changed - the one case where a reload is genuinely needed.
+printf 'different bytes\n' > "$CONF/candidate/sing-box-c.json"
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: a changed candidate still reloads" "$?" "1"
+printf 'same bytes\n' > "$CONF/candidate/sing-box-c.json"
+
+# The intercept layer was released: sing-box is up but the LAN is not proxied.
+# Skipping here is the silent state hp_rearm_intercept exists to undo.
+: > "$CONF/intercept-released"
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: a released intercept layer still reloads" "$?" "1"
+rm -f "$CONF/intercept-released"
+
+# No candidate staged - the preflight never got that far, or the side is new.
+mv "$CONF/candidate/sing-box-c.json" "$CONF/candidate/staged"
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: no staged candidate still reloads" "$?" "1"
+mv "$CONF/candidate/staged" "$CONF/candidate/sing-box-c.json"
+
+# An empty live file is not a running configuration.
+: > "$CONF/sing-box-c.json"
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: an empty live file still reloads" "$?" "1"
+printf 'same bytes\n' > "$CONF/sing-box-c.json"
+
+# The instance is not running.  A live file left behind by a crashed process is
+# not a service, and skipping the restart would report success over a dead
+# proxy - so the answer has to come from the running state, not the file.
+cat > "$WORK/noop-bin/ubus" <<'EOF'
+#!/bin/sh
+echo '{"homeproxy":{"instances":{"sing-box-c":{"running":false}}}}'
+EOF
+chmod +x "$WORK/noop-bin/ubus"
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: an instance that is not running still reloads" "$?" "1"
+
+# And with no ubus at all the state cannot be established, which has to fall
+# through to a real reload rather than guess.
+cat > "$WORK/noop-bin/ubus" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$WORK/noop-bin/ubus"
+hp_reload_is_noop "$CONF" 1 0
+expect "reload_is_noop: an unusable ubus still reloads" "$?" "1"
+
+# A server side is judged on its own: a client-only no-op must not let a
+# changed server configuration slip through, and an enabled server with no
+# live file is a change, not a no-op.
+cat > "$WORK/noop-bin/ubus" <<'EOF'
+#!/bin/sh
+cat <<JSON
+{"homeproxy":{"instances":{"sing-box-c":{"running":true},"sing-box-s":{"running":true}}}}
+JSON
+EOF
+chmod +x "$WORK/noop-bin/ubus"
+printf 'server v1\n' > "$CONF/sing-box-s.json"
+printf 'server v2\n' > "$CONF/candidate/sing-box-s.json"
+hp_reload_is_noop "$CONF" 1 1
+expect "reload_is_noop: a changed server side still reloads" "$?" "1"
+printf 'server v1\n' > "$CONF/candidate/sing-box-s.json"
+hp_reload_is_noop "$CONF" 1 1
+expect "reload_is_noop: both sides identical is a no-op" "$?" "0"
+rm -f "$CONF/sing-box-s.json"
+hp_reload_is_noop "$CONF" 1 1
+expect "reload_is_noop: an enabled server with no live file still reloads" "$?" "1"
+
 printf '%d checks, %d failures\n' "$CHECKS" "$FAILURES"
 exit $FAILED

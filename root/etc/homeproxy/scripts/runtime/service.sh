@@ -601,6 +601,94 @@ hp_capture_candidate() {
 	return 0
 }
 
+# hp_reload_is_noop <run-dir> <client-enabled> <server-enabled>
+# 0 when this reload would change nothing that is currently running, so the
+# caller can skip the stop;start entirely.
+#
+# Why this exists: reload_service used to stop and start unconditionally, and
+# hp_same_file was only ever used on the rollback path.  Measured on the device,
+# one reload costs about eight seconds (09:17:40 -> 09:17:48 in the log) and
+# interrupts every connection, even when the generated configuration is
+# byte-identical to the one already running.  That is the common case for
+# "Save & Apply" with nothing edited, for a node switch that lands on the same
+# node, and for the nightly resource refresh.
+#
+# The comparison is against the LIVE file, not against a hash of the UCI.  The
+# live file is what is actually running, it is what the generator just produced
+# a candidate for, and cmp on two files cannot be fooled by UCI key ordering -
+# all of which a cached `md5($UCI)` would be.  No state is added: there is
+# nothing to keep in sync, because both sides are already on disk.
+#
+# Every condition is a *precondition for the skip being safe*, and the default
+# on any doubt is to reload:
+#
+#   [1] the service is actually running.  A live file left over from a crashed
+#       instance is not a running service, and skipping the restart would
+#       report success over a dead proxy.  Asked of ubus, the same source the
+#       status page reads.
+#   [2] no side this reload was going to activate is missing.  A side the user
+#       just enabled has a candidate but may have no live file yet; that is a
+#       change, not a no-op.
+#   [3] the intercept layer is installed.  A released layer (the marker
+#       hp_release_stale_intercept writes) means the firewall is NOT proxying
+#       right now even though sing-box is up.  Skipping the restart would leave
+#       it that way and log "nothing to restart" - the exact silent state
+#       hp_rearm_intercept exists to undo.  Reloading is what re-arms it.
+hp_reload_is_noop() {
+	local run_dir="$1"
+	local client_enabled="$2"
+	local server_enabled="$3"
+	local live cand
+
+	# [3] first, because it is the cheapest and the most dangerous to skip.
+	[ ! -f "$run_dir/intercept-released" ] || return 1
+
+	# [1] the instances.  `command -v ubus` because this module is also sourced
+	# by the off-target test driver, where ubus does not exist and the honest
+	# answer there is "cannot prove it is a no-op".
+	#
+	# The check is on `"running": true`, NOT on the instance merely appearing
+	# in the list: procd keeps a stopped instance in `service list` with
+	# running=false, so matching the key alone reports a dead proxy as running
+	# and the skip then claims success over it.  That was not theoretical - the
+	# first version of this grep did exactly that and its own test caught it.
+	command -v ubus > "/dev/null" 2>&1 || return 1
+
+	local svc_list
+	svc_list="$(ubus call service list "{\"name\":\"$CONF\"}" 2>/dev/null)"
+
+	if [ "$client_enabled" = "1" ]; then
+		printf '%s' "$svc_list" \
+			| grep -A 3 '"sing-box-c"' \
+			| grep -q '"running"[[:space:]]*:[[:space:]]*true' || return 1
+	fi
+
+	if [ "$server_enabled" = "1" ]; then
+		printf '%s' "$svc_list" \
+			| grep -A 3 '"sing-box-s"' \
+			| grep -q '"running"[[:space:]]*:[[:space:]]*true' || return 1
+	fi
+
+	# [2] and the byte comparison, per side.
+	if [ "$client_enabled" = "1" ]; then
+		live="$run_dir/sing-box-c.json"
+		cand="$run_dir/candidate/sing-box-c.json"
+
+		[ -s "$live" ] && [ -s "$cand" ] || return 1
+		cmp -s "$cand" "$live" 2>"/dev/null" || return 1
+	fi
+
+	if [ "$server_enabled" = "1" ]; then
+		live="$run_dir/sing-box-s.json"
+		cand="$run_dir/candidate/sing-box-s.json"
+
+		[ -s "$live" ] && [ -s "$cand" ] || return 1
+		cmp -s "$cand" "$live" 2>"/dev/null" || return 1
+	fi
+
+	return 0
+}
+
 # hp_start_generated_config <side> <hp-dir> <run-dir> <good-dir>
 # The start-path transaction for one side ("c" or "s"):
 #
