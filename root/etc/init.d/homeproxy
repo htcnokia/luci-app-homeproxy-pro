@@ -620,7 +620,7 @@ reload_service() {
 	# `HP_CANDIDATE_CLIENT` is the same flag the preflight set, so the two
 	# sides cannot disagree about which configuration is being activated.
 	if [ "$HP_CANDIDATE_CLIENT" = "1" ] || [ "$HP_CANDIDATE_SERVER" = "1" ]; then
-		if hp_reload_is_noop "$RUN_DIR" "$HP_CANDIDATE_CLIENT" "$HP_CANDIDATE_SERVER"; then
+		if hp_reload_is_noop "$RUN_DIR" "$GOOD_DIR" "$HP_CANDIDATE_CLIENT" "$HP_CANDIDATE_SERVER"; then
 			log "Configuration is unchanged and the service is healthy; nothing to restart."
 			return 0
 		fi
