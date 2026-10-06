@@ -58,6 +58,31 @@ sed -e "s#^export const RUN_DIR = '/var/run/homeproxy';#export const RUN_DIR = '
     -e "s#^export const UCICONFIG_DIR = '/etc/config';#export const UCICONFIG_DIR = '$WORK/cfg';#" \
     "$ROOT/root/etc/homeproxy/scripts/homeproxy.uc" > "$WORK/scripts/homeproxy.uc"
 
+# validate_data.  homeproxy.uc validates a node's address and port by shelling
+# out to /sbin/validate_data, which exists only on an OpenWrt target.  Without
+# it validation() returns false for everything, every node is rejected as
+# "Skipping invalid vless node", and the commit case below can never reach the
+# commit - it passed on the device (validate_data present) and failed on CI
+# (absent), which is exactly the kind of host difference this test must not
+# carry.
+#
+# The substitution is the one the rest of the suite already uses: the same
+# HP_VALIDATE_DATA indirection tests/ucode/run.sh exports off-target, and
+# tests/ucode/test_generators.sh applies while staging the generator.  It
+# reproduces the caller's contract (exit 0 = valid) and is deliberately a
+# pinned fixture rather than an equivalent - see tests/toolchain/validate-data.sh.
+if [ ! -x /sbin/validate_data ] && [ -n "${HP_VALIDATE_DATA:-}" ] && [ -x "${HP_VALIDATE_DATA}" ]; then
+	sed -e "s#/sbin/validate_data#${HP_VALIDATE_DATA}#g" \
+		"$WORK/scripts/homeproxy.uc" > "$WORK/scripts/homeproxy.uc.new"
+	mv -f "$WORK/scripts/homeproxy.uc.new" "$WORK/scripts/homeproxy.uc"
+
+	if ! grep -qF "$HP_VALIDATE_DATA" "$WORK/scripts/homeproxy.uc"; then
+		echo "FAIL: could not point validation() at HP_VALIDATE_DATA (anchor moved)"
+		rm -rf "$WORK"
+		exit 1
+	fi
+fi
+
 # An unpatched copy would read - and on a real device write - the live
 # /etc/config/homeproxy.  Fail here instead of silently testing the wrong file.
 if ! grep -q "^export const UCICONFIG_DIR = '$WORK/cfg';" "$WORK/scripts/homeproxy.uc"; then
