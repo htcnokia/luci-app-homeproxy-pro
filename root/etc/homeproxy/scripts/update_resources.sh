@@ -57,9 +57,9 @@ pick_mirror() {
 			# GitHub raw serves paths from the repo root, not the
 			# /gh/<repo>@<sha>/<file> shape jsdelivr uses. The caller
 			# passes the suffix already split out, so we re-stitch it.
-			local probe_url="https://$base/$listrepo/$list_sha/$listname"
+			local probe_url="https://$base/$listrepo/$list_sha/$api_path"
 		else
-			local probe_url="https://$base/gh/$listrepo@$list_sha/$listname"
+			local probe_url="https://$base/gh/$listrepo@$list_sha/$api_path"
 		fi
 		# uclient-fetch, not wget.  wget is whichever implementation the
 		# buildroot compiled, and the two share almost no options: on a
@@ -134,8 +134,17 @@ check_list_update() {
 	local listref="$3"
 	local listname="$4"
 	# v4 / v6 when the upstream file holds both families and has to be split;
-	# empty when it is already exactly what this listtype wants.
+	# empty when it is already exactly what listtype wants.
 	local family="${5:-}"
+	# Where the file lives *inside* the repo, for the commits?path= filter.
+	# Equal to the file name for every root-level list, which is all of them
+	# used to be - that is why this went unnoticed until a source shipped its
+	# list in a subdirectory.  MetaCubeX keeps cn.list under geo/geoip/, and
+	# asking the API about "cn.list" there is not a narrower question, it is a
+	# different one: it matches no commit, returns [], and the update reports
+	# "Failed to get the latest version" on every run while the file itself is
+	# perfectly reachable.  Downloaded as $listname regardless.
+	local api_path="${6:-$listname}"
 	local lock="$RUN_DIR/update_resources-$listtype.lock"
 	local github_token="$(uci -q get homeproxy.config.github_token)"
 	local fetch="uclient-fetch -q --timeout=10"
@@ -170,7 +179,7 @@ check_list_update() {
 	# failure as "Failed to get the latest version, please retry later", which
 	# loses the difference between "could not fetch" and "fetched, got nothing".
 	local list_info
-	list_info="$($fetch ${github_header:+--header="$github_header"} -O- "https://api.github.com/repos/$listrepo/commits?sha=$listref&path=$listname&per_page=1")"
+	list_info="$($fetch ${github_header:+--header="$github_header"} -O- "https://api.github.com/repos/$listrepo/commits?sha=$listref&path=$api_path&per_page=1")"
 	local fetch_exit=$?
 
 	if [ $fetch_exit -ne 0 ]; then
@@ -208,9 +217,9 @@ check_list_update() {
 	fi
 	local mirror_url
 	if [ "$mirror" = "raw.githubusercontent.com" ]; then
-		mirror_url="https://raw.githubusercontent.com/$listrepo/$list_sha/$listname"
+		mirror_url="https://raw.githubusercontent.com/$listrepo/$list_sha/$api_path"
 	else
-		mirror_url="https://$mirror/gh/$listrepo@$list_sha/$listname"
+		mirror_url="https://$mirror/gh/$listrepo@$list_sha/$api_path"
 	fi
 	log "[$(to_upper "$listtype")] Downloading from $mirror."
 
@@ -233,7 +242,7 @@ check_list_update() {
 	# nobody vouched for - is the thing being fixed.
 	local api_blob local_blob
 	api_blob="$($fetch ${github_header:+--header="$github_header"} -O- \
-		"https://api.github.com/repos/$listrepo/contents/$listname?ref=$list_sha" \
+		"https://api.github.com/repos/$listrepo/contents/$api_path?ref=$list_sha" \
 		| jsonfilter -qe '@.sha')"
 	if [ -z "$api_blob" ]; then
 		rm -f "$RUN_DIR/$listname"
@@ -372,8 +381,10 @@ case "$1" in
 	# both axes), because it merges neighbouring blocks a little more coarsely
 	# than MaxMind does.  IPv6 goes from 1031 to 3446 entries, which also closes
 	# the 7.93% overlap with the APNIC CN IPv6 blocks the old ipv6.txt had.
+	# $api_path, not $listname: the commits filter asks where the file is in
+	# the repo, which for this source is not the repo root.
 	check_list_update "$1" "MetaCubeX/meta-rules-dat" "meta" "cn.list" \
-		"$([ "$1" = "china_ip4" ] && echo v4 || echo v6)"
+		"$([ "$1" = "china_ip4" ] && echo v4 || echo v6)" "geo/geoip/cn.list"
 	;;
 "gfw_list")
 	check_list_update "$1" "Loyalsoldier/v2ray-rules-dat" "release" "gfw.txt"

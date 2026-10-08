@@ -106,7 +106,24 @@ emit() {
 	fi
 }
 case "$url" in
-*api.github.com/*/commits*) emit "$(cat "$HP_T_API_COMMITS")" ;;
+*api.github.com/*/commits*)
+	# Filtered by path, the way the real endpoint is.  Asking for a file
+	# that is not at that path is not a narrower question, it is a different
+	# one: it matches no commit and comes back [].  That is the whole reason
+	# the in-repo path is a separate argument from the file name, and it is
+	# what this branch can now catch - every list this project ships used to
+	# live in the repo root, so path= and the file name were the same string
+	# and nothing could tell them apart.
+	case "$url" in
+	*repos/MetaCubeX/*)
+		case "$url" in
+		*"path=geo/geoip/cn.list"*) emit "$(cat "$HP_T_API_COMMITS")" ;;
+		*) emit '[]' ;;
+		esac
+		;;
+	*) emit "$(cat "$HP_T_API_COMMITS")" ;;
+	esac
+	;;
 *api.github.com/*/contents*) emit "$(cat "$HP_T_API_CONTENTS")" ;;
 *)
 	# A spider probe (-s) checks reachability only, and its stdout is captured
@@ -115,6 +132,19 @@ case "$url" in
 	# applet prints nothing for a probe.
 	[ "$probe" = "0" ] || exit 0
 	if [ -n "${HP_T_FETCH_FAIL:-}" ]; then exit 1; fi
+	# The same wrong-path mistake reaches the download as a 404, and
+	# pick_mirror turns that into "all mirrors unreachable" - a second
+	# symptom of the one bug, reported as an unrelated-looking network
+	# failure.  Scoped to this source so the other lists, whose file name is
+	# their in-repo path, keep resolving.
+	case "$url" in
+	*MetaCubeX/meta-rules-dat*)
+		case "$url" in
+		*geo/geoip/cn.list*) ;;
+		*) exit 1 ;;
+		esac
+		;;
+	esac
 	emit "$(cat "$HP_T_BODY")"
 	;;
 esac

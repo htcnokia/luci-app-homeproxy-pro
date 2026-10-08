@@ -15,8 +15,13 @@ check_list_update() {
 	# with install_download() in root/etc/homeproxy/scripts/update_resources.sh,
 	# which does the same split on the router.
 	local family="${5:-}"
+	# Where the file is inside the repo, for the commits?path= filter.  Same
+	# value as $listname for every root-level list; a source that keeps its
+	# list in a subdirectory needs it spelled out or the query matches no
+	# commit and returns [].  Downloaded as $listname regardless.
+	local api_path="${6:-$listname}"
 
-	local list_info="$(gh api "repos/$listrepo/commits?sha=$listref&path=$listname&per_page=1")"
+	local list_info="$(gh api "repos/$listrepo/commits?sha=$listref&path=$api_path&per_page=1")"
 	local list_sha="$(echo -e "$list_info" | jq -r ".[].sha")"
 	local list_date="$(echo -e "$list_info" | jq -r ".[].commit.committer.date" | cut -d 'T' -f1)"
 	if [ -z "$list_sha" ]; then
@@ -36,7 +41,7 @@ check_list_update() {
 		echo -e "[${listtype^^}] Local version: $local_list_disp, latest version: ${list_ver%% *}."
 	fi
 
-	if ! curl -fsSL "https://raw.githubusercontent.com/$listrepo/$list_sha/$listname" -o "$TEMP_DIR/$listname" || [ ! -s "$TEMP_DIR/$listname" ]; then
+	if ! curl -fsSL "https://raw.githubusercontent.com/$listrepo/$list_sha/$api_path" -o "$TEMP_DIR/$listname" || [ ! -s "$TEMP_DIR/$listname" ]; then
 		rm -f "$TEMP_DIR/$listname"
 		echo -e "[${listtype^^}] Update failed."
 		return 1
@@ -85,8 +90,8 @@ check_list_update() {
 # text so the nft set and the generated route rule-set keep reading one file,
 # and it is a file in a git repository so the router's blob-id check still
 # applies.  Full comparison in docs/cn-ip-source-benchmark.md.
-check_list_update "china_ip4" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v4"
-check_list_update "china_ip6" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v6"
+check_list_update "china_ip4" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v4" "geo/geoip/cn.list"
+check_list_update "china_ip6" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v6" "geo/geoip/cn.list"
 check_list_update "gfw_list" "Loyalsoldier/v2ray-rules-dat" "release" "gfw.txt"
 
 # The upstream direct-list is not a dnsmasq domain list: `full:` marks an exact
