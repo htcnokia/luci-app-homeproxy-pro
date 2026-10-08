@@ -82,14 +82,22 @@ check_list_update() {
 # Upstream is MetaCubeX/meta-rules-dat's cn.list rather than the
 # 1715173329/IPCIDR-CHINA pair r46 shipped.  Measured against the APNIC
 # delegated statistics, the old lists missed 62,927,616 CN IPv4 addresses
-# (18.2% of everything APNIC has allocated to CN) against cn.list's 1,519,872
-# (0.44%); the two largest gaps were the Beijing Telecom backbone blocks
-# 59.192.0.0/21 and 175.48.0.0/21, so destinations resolving into them missed
-# the mainland rule and went to the proxy.  cn.list is also slightly *more*
-# precise (99.22% of what it lists is CN, against 98.92%).  It stays pure CIDR
-# text so the nft set and the generated route rule-set keep reading one file,
-# and it is a file in a git repository so the router's blob-id check still
-# applies.  Full comparison in docs/cn-ip-source-benchmark.md.
+# against cn.list's 1,519,872; the two largest gaps were the Beijing Telecom
+# backbone blocks 59.192.0.0/21 and 175.48.0.0/21, so destinations resolving
+# into them missed the mainland rule and went to the proxy.  cn.list is also
+# slightly *more* precise (99.22% of what it lists is CN, against 98.92%).  It
+# stays pure CIDR text so the nft set and the generated route rule-set keep
+# reading one file, and it is a file in a git repository so the router's
+# blob-id check still applies.
+#
+# CORRECTION (2026-10-08): the numbers above were measured against the APNIC
+# delegated file, and that file is NOT the authority - its `cc` column is a
+# coarse registry summary that loses sub-allocations (it reports 8.128.0.0/10 as
+# SG where RDAP says CN/ALICLOUD).  Do not reuse those figures, and do not use
+# that file as a yardstick; use RDAP (https://rdap.apnic.net/ip/<address>).
+# Measured that way, this source still beats the r46 pair on both axes, and the
+# delegated statistics were rejected as a *replacement* source precisely because
+# deriving from them drops ~100 million addresses this list carries correctly.
 check_list_update "china_ip4" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v4" "geo/geoip/cn.list"
 check_list_update "china_ip6" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v6" "geo/geoip/cn.list"
 check_list_update "gfw_list" "Loyalsoldier/v2ray-rules-dat" "release" "gfw.txt"
