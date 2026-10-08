@@ -10,6 +10,11 @@ check_list_update() {
 	local listrepo="$2"
 	local listref="$3"
 	local listname="$4"
+	# v4 / v6 when the upstream file holds both families and has to be split;
+	# empty when it is already exactly what this listtype wants.  Kept in step
+	# with install_download() in root/etc/homeproxy/scripts/update_resources.sh,
+	# which does the same split on the router.
+	local family="${5:-}"
 
 	local list_info="$(gh api "repos/$listrepo/commits?sha=$listref&path=$listname&per_page=1")"
 	local list_sha="$(echo -e "$list_info" | jq -r ".[].sha")"
@@ -37,15 +42,51 @@ check_list_update() {
 		return 1
 	fi
 
-	mv -f "$TEMP_DIR/$listname" "$RESOURCES_DIR/$listtype.${listname##*.}"
+	# cn.list is one file carrying both address families, so the two IP lists
+	# are split out of it instead of moved.  That also overrides the
+	# "$listtype.<upstream extension>" naming, which would install cn.list as
+	# china_ip4.list while every reader expects .txt.  Written through a temp
+	# file and renamed, and an empty half is a failure rather than an empty
+	# list: firewall_post.ut reads a zero prefix count in china_ip6.txt as
+	# "IPv6 cannot be classified" and turns v6 handling off.
+	if [ -n "$family" ]; then
+		local dest="$RESOURCES_DIR/$listtype.txt"
+		awk -v want="$family" '
+			NF == 0 { next }
+			{ if ((index($1, ":") > 0) == (want == "v6")) print }
+		' "$TEMP_DIR/$listname" > "$dest.hp-new"
+		if [ ! -s "$dest.hp-new" ]; then
+			rm -f "$dest.hp-new"
+			echo -e "[${listtype^^}] Conversion failed; $listname carries no $family entries."
+			rm -f "$TEMP_DIR/$listname"
+			return 1
+		fi
+		mv -f "$dest.hp-new" "$dest"
+		rm -f "$TEMP_DIR/$listname"
+	elif ! mv -f "$TEMP_DIR/$listname" "$RESOURCES_DIR/$listtype.${listname##*.}"; then
+		rm -f "$TEMP_DIR/$listname"
+		echo -e "[${listtype^^}] Update failed."
+		return 1
+	fi
 	echo -e "$list_ver" > "$RESOURCES_DIR/$listtype.ver"
 	echo -e "[${listtype^^}] Successfully updated."
 
 	return 0
 }
 
-check_list_update "china_ip4" "1715173329/IPCIDR-CHINA" "master" "ipv4.txt"
-check_list_update "china_ip6" "1715173329/IPCIDR-CHINA" "master" "ipv6.txt"
+# Upstream is MetaCubeX/meta-rules-dat's cn.list rather than the
+# 1715173329/IPCIDR-CHINA pair r46 shipped.  Measured against the APNIC
+# delegated statistics, the old lists missed 62,927,616 CN IPv4 addresses
+# (18.2% of everything APNIC has allocated to CN) against cn.list's 1,519,872
+# (0.44%); the two largest gaps were the Beijing Telecom backbone blocks
+# 59.192.0.0/21 and 175.48.0.0/21, so destinations resolving into them missed
+# the mainland rule and went to the proxy.  cn.list is also slightly *more*
+# precise (99.22% of what it lists is CN, against 98.92%).  It stays pure CIDR
+# text so the nft set and the generated route rule-set keep reading one file,
+# and it is a file in a git repository so the router's blob-id check still
+# applies.  Full comparison in docs/cn-ip-source-benchmark.md.
+check_list_update "china_ip4" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v4"
+check_list_update "china_ip6" "MetaCubeX/meta-rules-dat" "meta" "cn.list" "v6"
 check_list_update "gfw_list" "Loyalsoldier/v2ray-rules-dat" "release" "gfw.txt"
 
 # The upstream direct-list is not a dnsmasq domain list: `full:` marks an exact

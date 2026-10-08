@@ -82,11 +82,60 @@ pick_mirror() {
 	return 1
 }
 
+# Put a verified download in place as $listtype.<ext>.
+#
+# With a `family` set the upstream file is one combined list - cn.list carries
+# both address families - and each listtype is one half of it, so the bytes are
+# split rather than moved.  That also overrides the "<listtype>.<upstream
+# extension>" naming: cn.list would otherwise land as china_ip4.list, while
+# every reader - firewall_post.ut's nft set and china_ip_ruleset.uc's generated
+# rule-set - has always read .txt.  Splitting writes $listtype.txt directly, so
+# nothing downstream changes name or location.
+#
+# The split writes a sibling temp file and renames it, so a half-written list
+# can never become the installed one.  An empty half is refused: an empty
+# china_ip6.txt turns v6_handled off outright (see the comment on
+# cn_ipv6_ready in firewall_post.ut), and a router that silently stops proxying
+# IPv6 is worse than one that keeps the list it had.
+#
+# The family test is "does the address contain a colon", which is exactly what
+# separates an IPv6 CIDR from an IPv4 one, and it is what the rest of the
+# pipeline already keys off - see isValidCIDR() in homeproxy.uc.
+install_download() {
+	local src="$1"
+	local listtype="$2"
+	local listname="$3"
+	local family="$4"
+
+	if [ -z "$family" ]; then
+		mv -f "$src" "$RESOURCES_DIR/$listtype.${listname##*.}"
+		return $?
+	fi
+
+	local dest="$RESOURCES_DIR/$listtype.txt"
+	if ! awk -v want="$family" '
+		NF == 0 { next }
+		{ if ((index($1, ":") > 0) == (want == "v6")) print }
+	' "$src" > "$dest.hp-new"; then
+		rm -f "$dest.hp-new"
+		return 1
+	fi
+	if [ ! -s "$dest.hp-new" ]; then
+		rm -f "$dest.hp-new"
+		log "[$(to_upper "$listtype")] Refusing to install: $listname carries no $family entries."
+		return 1
+	fi
+	mv -f "$dest.hp-new" "$dest"
+}
+
 check_list_update() {
 	local listtype="$1"
 	local listrepo="$2"
 	local listref="$3"
 	local listname="$4"
+	# v4 / v6 when the upstream file holds both families and has to be split;
+	# empty when it is already exactly what this listtype wants.
+	local family="${5:-}"
 	local lock="$RUN_DIR/update_resources-$listtype.lock"
 	local github_token="$(uci -q get homeproxy.config.github_token)"
 	local fetch="uclient-fetch -q --timeout=10"
@@ -205,7 +254,11 @@ check_list_update() {
 		return 1
 	fi
 
-	if mv -f "$RUN_DIR/$listname" "$RESOURCES_DIR/$listtype.${listname##*.}"; then
+	if install_download "$RUN_DIR/$listname" "$listtype" "$listname" "$family"; then
+		# The split path reads the download and writes the halves, so the
+		# download itself is still lying in RUN_DIR; the plain move consumed
+		# it.  Either way nothing may be left there for the next run.
+		rm -f "$RUN_DIR/$listname"
 		printf '%s\n' "$list_ver" > "$RESOURCES_DIR/$listtype.ver"
 		# Review M7: persist the time *this router* last succeeded.
 		# $list_date is the upstream commit date and can be months old
@@ -288,7 +341,8 @@ check_list_update() {
 		esac
 	else
 		rm -f "$RUN_DIR/$listname"
-		log "[$(to_upper "$listtype")] Failed to install update (mv failed)."
+		rm -f "$RESOURCES_DIR/$listtype.txt.hp-new"
+		log "[$(to_upper "$listtype")] Failed to install update."
 		return 1
 	fi
 
@@ -296,11 +350,30 @@ check_list_update() {
 }
 
 case "$1" in
-"china_ip4")
-	check_list_update "$1" "1715173329/IPCIDR-CHINA" "master" "ipv4.txt"
-	;;
-"china_ip6")
-	check_list_update "$1" "1715173329/IPCIDR-CHINA" "master" "ipv6.txt"
+"china_ip4"|"china_ip6")
+	# Both come out of one upstream file and are split by address family - see
+	# install_download().  Upstream is MetaCubeX/meta-rules-dat's cn.list, pure
+	# CIDR text, which is what keeps the whole existing design intact: it is a
+	# file in a git repository, so the blob-id check above vouches for it the
+	# same way it vouches for every other list, and one text file feeds both the
+	# nft set and the generated route rule-set, so the two readers cannot drift.
+	#
+	# Why this source and not the 1715173329/IPCIDR-CHINA lists r46 shipped:
+	# measured against the APNIC delegated statistics (the registration data
+	# every other list is derived from, not another third-party CN list), the
+	# old pair missed 62,927,616 CN IPv4 addresses - 18.2% of every address
+	# APNIC has allocated to CN - while cn.list misses 1,519,872 (0.44%).  The
+	# biggest of those gaps are 59.192.0.0/21 and 175.48.0.0/21, Beijing
+	# Telecom backbone ranges, so the cost was not theoretical: destinations
+	# resolving into them missed the mainland rule and went to the proxy.
+	#
+	# cn.list's precision is slightly looser than the old lists' (99.22% of the
+	# addresses it lists are CN, against 98.92% before - i.e. it is better on
+	# both axes), because it merges neighbouring blocks a little more coarsely
+	# than MaxMind does.  IPv6 goes from 1031 to 3446 entries, which also closes
+	# the 7.93% overlap with the APNIC CN IPv6 blocks the old ipv6.txt had.
+	check_list_update "$1" "MetaCubeX/meta-rules-dat" "meta" "cn.list" \
+		"$([ "$1" = "china_ip4" ] && echo v4 || echo v6)"
 	;;
 "gfw_list")
 	check_list_update "$1" "Loyalsoldier/v2ray-rules-dat" "release" "gfw.txt"

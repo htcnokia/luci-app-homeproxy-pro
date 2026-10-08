@@ -205,14 +205,20 @@ EOF
 
 write_contents_json() {
 	# write_contents_json <blob-sha-or-empty>
+	# The upstream file is cn.list, not ipv4.txt: it carries both address
+	# families and each listtype takes one half of it (install_download).
 	if [ -n "$1" ]; then
-		printf '{"name":"ipv4.txt","size":6,"sha":"%s"}' "$1" > "$WORK/api-contents.json"
+		printf '{"name":"cn.list","size":6,"sha":"%s"}' "$1" > "$WORK/api-contents.json"
 	else
-		printf '{"name":"ipv4.txt","size":6}' > "$WORK/api-contents.json"
+		printf '{"name":"cn.list","size":6}' > "$WORK/api-contents.json"
 	fi
 }
 
-printf 'fresh\n' > "$WORK/body.txt"
+# Mixed on purpose: china_ip4 must end up holding only the first line, and the
+# IPv6 line is what the china_ip6 cases below split out.  Keeping "fresh" as the
+# single IPv4 line means the cases that only care about the blob-id handshake
+# keep asserting on "fresh" unchanged.
+printf 'fresh\n2001:db8::/32\n' > "$WORK/body.txt"
 printf 'stale-installed-copy\n' > "$WORK/resources/china_ip4.txt"
 printf 'OLDVERSION' > "$WORK/resources/china_ip4.ver"
 
@@ -269,7 +275,7 @@ expect "the .ver is untouched" "$(cat "$WORK/resources/china_ip4.ver")" "OLDVERS
 expect "no .updated_at was written" "$([ -e "$WORK/resources/china_ip4.updated_at" ] && echo yes || echo no)" "no"
 expect "the refusal is logged with both ids" \
 	"$(grep -c "does not match the content of commit $API_SHA" "$WORK/run/homeproxy.log")" "1"
-expect "the downloaded copy was discarded" "$([ -e "$WORK/run/ipv4.txt" ] && echo yes || echo no)" "no"
+expect "the downloaded copy was discarded" "$([ -e "$WORK/run/cn.list" ] && echo yes || echo no)" "no"
 
 echo "== case 3: no blob id from the API -> refused =="
 reset_state
@@ -372,6 +378,53 @@ expect "the previous list is untouched" \
 expect "the .ver is untouched" "$(cat "$WORK/resources/china_list.ver")" "OLDVERSION"
 expect "the generator was never called" \
 	"$([ -e "$HP_T_SEEN_SOURCE" ] && echo yes || echo no)" "no"
+
+echo "== case 8: cn.list is split by address family =="
+# Both IP lists come out of one upstream file now (MetaCubeX cn.list), so the
+# install step splits rather than moves.  What has to hold: each listtype ends
+# up at its own .txt name with only its own family in it, and the combined
+# download is not left lying in RUN_DIR for the next run to trip over.
+reset_state
+printf 'OLDVERSION' > "$WORK/resources/china_ip6.ver"
+rm -f "$WORK/resources/china_ip6.txt"
+# Set here rather than relying on the top-of-file fixture: case 6 overwrote
+# body.txt with its own domain lines.
+printf '1.0.0.0/24\n2001:db8::/32\n' > "$WORK/body.txt"
+: > "$WORK/run/homeproxy.log"
+printf '%s' "$LOCAL_SHA" > "$HP_T_LOCAL_BLOB"
+rc="$("$RUN_SH" "$WORK/scripts/update_resources.sh" china_ip6 > "$WORK/stdout" 2>&1; echo $?)"
+expect "exit status 0" "$rc" "0"
+expect "china_ip6.txt was created by the split" \
+	"$(cat "$WORK/resources/china_ip6.txt" 2>/dev/null)" "2001:db8::/32"
+expect "it holds no IPv4 entry" \
+	"$(grep -cE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/' "$WORK/resources/china_ip6.txt" || true)" "0"
+expect "its .ver advanced like the v4 one" \
+	"$(cat "$WORK/resources/china_ip6.ver")" "2026-01-02 $API_SHA"
+expect "the combined download was cleaned out of RUN_DIR" \
+	"$([ -e "$WORK/run/cn.list" ] && echo yes || echo no)" "no"
+expect "no half-written temp file survived" \
+	"$([ -e "$WORK/resources/china_ip6.txt.hp-new" ] && echo yes || echo no)" "no"
+
+echo "== case 9: a family with no entries is refused, not installed empty =="
+# The failure this guards is silent: an empty china_ip6.txt makes
+# firewall_post.ut count zero usable prefixes and turn v6_handled off, after
+# which every mainland IPv6 connection goes to the proxy - with no error
+# anywhere.  Keeping the previous list is the only acceptable outcome.
+reset_state
+printf 'stale-v6-copy\n' > "$WORK/resources/china_ip6.txt"
+printf 'OLDVERSION' > "$WORK/resources/china_ip6.ver"
+printf 'only-v4-here/24\n' > "$WORK/body.txt"
+: > "$WORK/run/homeproxy.log"
+printf '%s' "$LOCAL_SHA" > "$HP_T_LOCAL_BLOB"
+rc="$("$RUN_SH" "$WORK/scripts/update_resources.sh" china_ip6 > "$WORK/stdout" 2>&1; echo $?)"
+expect "exit status non-zero" "$rc" "1"
+expect "the previous v6 list is untouched" \
+	"$(cat "$WORK/resources/china_ip6.txt")" "stale-v6-copy"
+expect "its .ver is untouched" "$(cat "$WORK/resources/china_ip6.ver")" "OLDVERSION"
+expect "the reason is logged" \
+	"$(grep -c 'carries no v6 entries' "$WORK/run/homeproxy.log")" "1"
+expect "no empty temp file survived" \
+	"$([ -e "$WORK/resources/china_ip6.txt.hp-new" ] && echo yes || echo no)" "no"
 
 printf '%d checks, %d failures\n' "$CHECKS" "$FAILURES"
 if [ "$FAILED" != "0" ]; then
