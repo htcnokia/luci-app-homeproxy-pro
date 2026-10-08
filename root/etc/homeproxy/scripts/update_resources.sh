@@ -128,6 +128,53 @@ install_download() {
 	mv -f "$dest.hp-new" "$dest"
 }
 
+# Re-render the firewall's mainland sets from the list that just changed.
+#
+# The route side goes live on its own - sing-box watches the generated
+# rule-set with fswatch - but homeproxy_mainland_addr_v4/v6 live in
+# fw4_post.nft, which firewall_post.ut renders and only a start or a restart
+# puts in place.  reload does not re-render it (measured on the device: the
+# command returns 0, the file's mtime does not move, the set keeps its old
+# elements).  So the two halves would read the same file on different days,
+# and the gap grows with every nightly update.
+#
+# The direction that matters is the one where the kernel is *ahead* of the
+# file: a segment the list has since dropped still matches the set, and
+# `ip daddr @homeproxy_mainland_addr_v4 counter return` returns before the
+# redirect - so the connection never reaches the route side that would have
+# corrected it.  The other direction (the set missing a newly added segment)
+# costs one extra hop into sing-box and still routes correctly.
+#
+# This mirrors hp_firewall_apply() in runtime/firewall.sh minus the pre-script
+# and the upnp restore: only the post-template carries these sets, and neither
+# of the other two has anything to do with a resource list.  It deliberately
+# does NOT test client_enabled the way start_service does - that check reads
+# a routing-mode-dependent helper, and duplicating it here would let the two
+# copies drift.  With no client the template renders what start would have
+# rendered, so re-rendering is a no-op rather than a risk.
+#
+# Every failure is non-fatal on purpose.  A list that is installed but not yet
+# in the firewall is the one state this script is allowed to leave behind:
+# the next nightly run, or the next service start, closes it.  Failing the
+# update instead would turn a cosmetic lag into a resource that can never
+# refresh.
+sync_firewall_sets() {
+	local dest="$RUN_DIR/fw4_post.nft"
+
+	if ! utpl -S "$SCRIPT_DIR/firewall_post.ut" > "$dest.new" 2>"/dev/null"; then
+		rm -f "$dest.new"
+		log "[$(to_upper "$listtype")] Warning: could not re-render fw4_post.nft; the firewall keeps its previous ruleset. Run /etc/init.d/homeproxy restart to pick this list up."
+		return 1
+	fi
+	mv -f "$dest.new" "$dest"
+
+	if ! fw4 reload >"/dev/null" 2>&1; then
+		log "[$(to_upper "$listtype")] Warning: fw4 reload failed; the new set is rendered but the running ruleset was not updated. Run /etc/init.d/homeproxy restart."
+		return 1
+	fi
+	log "[$(to_upper "$listtype")] Firewall mainland sets re-rendered."
+}
+
 check_list_update() {
 	local listtype="$1"
 	local listrepo="$2"
@@ -303,6 +350,12 @@ check_list_update() {
 				# "mainland IPv6 goes through the proxy" inversion.
 				log "[$(to_upper "$listtype")] Warning: could not regenerate $listtype.json (list has no usable CIDR entry?); the route side keeps the previous list."
 			fi
+			# The kernel half.  Unconditional, and deliberately outside the
+			# if/else above: the nft set is rendered from the .txt, not from
+			# the .json, so it can be right even when the generator failed -
+			# and a failed generator is exactly when the list on disk is most
+			# likely to have changed.  See sync_firewall_sets().
+			sync_firewall_sets
 			;;
 		"china_list")
 			# The DNS half of the same split.  It reads this file rather than

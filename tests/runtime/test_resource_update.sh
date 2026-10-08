@@ -209,6 +209,21 @@ cat > "$WORK/bin/flock" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+# utpl renders firewall_post.ut into the file named by -O-less stdout; the stub
+# writes a marker line and honours a failure switch, which is all the two
+# cases below need.  fw4 records that it was called and honours its own.
+cat > "$WORK/bin/utpl" <<'EOF'
+#!/bin/sh
+[ -n "${HP_T_UTPL_FAIL:-}" ] && exit 1
+printf 'rendered-from-utpl\n'
+exit 0
+EOF
+cat > "$WORK/bin/fw4" <<'EOF'
+#!/bin/sh
+[ -n "$HP_T_FW4_CALLED" ] && printf 'called\n' >> "$HP_T_FW4_CALLED"
+[ -n "${HP_T_FW4_FAIL:-}" ] && exit 1
+exit 0
+EOF
 chmod +x "$WORK/bin/"*
 
 PATH="$WORK/bin:$PATH"
@@ -455,6 +470,62 @@ expect "the reason is logged" \
 	"$(grep -c 'carries no v6 entries' "$WORK/run/homeproxy.log")" "1"
 expect "no empty temp file survived" \
 	"$([ -e "$WORK/resources/china_ip6.txt.hp-new" ] && echo yes || echo no)" "no"
+
+echo "== case 10: a successful IP update re-renders the firewall sets =="
+# The two halves of the mainland split read the same file but go live on
+# different triggers: sing-box watches the generated rule-set, while the nft
+# set is rendered into fw4_post.nft and otherwise only a start/restart puts
+# it in place.  Without this step the kernel's copy silently ages past the
+# file's, and a segment the list has since dropped keeps matching
+# `ip daddr @homeproxy_mainland_addr_v4 counter return` - which returns before
+# the redirect, so the route side never gets to correct it.
+reset_state
+printf 'v4-here/24\n2001:db8::/32\n' > "$WORK/body.txt"
+printf 'stale-rendered-ruleset\n' > "$WORK/run/fw4_post.nft"
+rm -f "$WORK/run/fw4_post.nft.new"
+export HP_T_FW4_CALLED="$WORK/fw4-called"
+rm -f "$HP_T_FW4_CALLED"
+: > "$WORK/run/homeproxy.log"
+rc="$("$RUN_SH" "$WORK/scripts/update_resources.sh" china_ip4 > "$WORK/stdout" 2>&1; echo $?)"
+expect "exit status 0" "$rc" "0"
+expect "fw4_post.nft was re-rendered from the new list" \
+	"$(cat "$WORK/run/fw4_post.nft" 2>/dev/null)" "rendered-from-utpl"
+expect "fw4 reload ran" \
+	"$(grep -c 'called' "$HP_T_FW4_CALLED" 2>/dev/null || echo 0)" "1"
+expect "no temp file left behind" \
+	"$([ -e "$WORK/run/fw4_post.nft.new" ] && echo yes || echo no)" "no"
+expect "the success is logged" \
+	"$(grep -c 'Firewall mainland sets re-rendered' "$WORK/run/homeproxy.log")" "1"
+
+echo "== case 11: a failed render is warned about, not fatal =="
+# Failing the update would be worse than the lag it is reporting: the list on
+# disk is already the one the commit vouched for, and a resource that can
+# never refresh is a far bigger problem than one that is briefly not in the
+# firewall.  The previous ruleset has to survive, or a bad render takes the
+# whole intercept layer down with it.
+reset_state
+printf 'v4-here/24\n2001:db8::/32\n' > "$WORK/body.txt"
+printf 'known-good-ruleset\n' > "$WORK/run/fw4_post.nft"
+rm -f "$WORK/run/fw4_post.nft.new"
+export HP_T_UTPL_FAIL=1
+: > "$WORK/run/homeproxy.log"
+# Cleared because the point of this case is that a failed render must not
+# reach fw4 at all - inheriting case 10's record would make the assertion
+# pass for the wrong reason if the branch started reloading anyway.
+rm -f "$HP_T_FW4_CALLED"
+rc="$("$RUN_SH" "$WORK/scripts/update_resources.sh" china_ip4 > "$WORK/stdout" 2>&1; echo $?)"
+unset HP_T_UTPL_FAIL
+expect "the update still succeeded" "$rc" "0"
+expect "the list was still installed" \
+	"$(cat "$WORK/resources/china_ip4.txt")" "v4-here/24"
+expect "the previous ruleset is untouched" \
+	"$(cat "$WORK/run/fw4_post.nft")" "known-good-ruleset"
+expect "no half-written temp file survived" \
+	"$([ -e "$WORK/run/fw4_post.nft.new" ] && echo yes || echo no)" "no"
+expect "fw4 was NOT reloaded" \
+	"$(grep -c 'called' "$HP_T_FW4_CALLED" 2>/dev/null || echo 0)" "0"
+expect "the warning names the manual recovery" \
+	"$(grep -c 'could not re-render fw4_post.nft' "$WORK/run/homeproxy.log")" "1"
 
 printf '%d checks, %d failures\n' "$CHECKS" "$FAILURES"
 if [ "$FAILED" != "0" ]; then
